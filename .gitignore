@@ -1,0 +1,15 @@
+# JUCE is fetched separately (see README)
+third_party/
+
+# build output
+build/
+
+# Python
+.venv/
+__pycache__/
+
+# editors / OS
+.DS_Store
+.vscode/
+.idea/
+*.swp

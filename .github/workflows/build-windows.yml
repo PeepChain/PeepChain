@@ -1,0 +1,53 @@
+# Builds the Windows VST3 on GitHub's Windows machines.
+#  - every push to main, every pull request, or "Run workflow" on the Actions tab: the plugin is attached to
+#    the run as a downloadable artifact (kept 90 days)
+#  - pushing a tag like v0.1.0: also publishes a GitHub Release with PeepChain-VST3-Windows.zip
+name: Build Windows VST3
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write          # only used by the release step (tags)
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get JUCE 8.0.15
+        run: git clone --depth 1 --branch 8.0.15 https://github.com/juce-framework/JUCE.git third_party/JUCE
+
+      - name: Check the tag matches the version in CMakeLists.txt
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          v=$(sed -n 's/^project(PeepChain VERSION \([0-9.]*\)).*/\1/p' CMakeLists.txt)
+          [ "v$v" = "${{ github.ref_name }}" ] || { echo "Tag ${{ github.ref_name }} but CMakeLists.txt says $v: bump project(VERSION) first"; exit 1; }
+
+      - name: Configure
+        run: cmake -S . -B build -A x64
+
+      - name: Build
+        run: cmake --build build --config Release --target PeepChain_VST3 --parallel
+
+      - name: Package
+        shell: pwsh
+        run: Compress-Archive -Path build/PeepChain_artefacts/Release/VST3/PeepChain.vst3 -DestinationPath PeepChain-VST3-Windows.zip
+
+      - uses: actions/upload-artifact@v4          # GitHub zips it on download; inside is the PeepChain.vst3 folder
+        with:
+          name: PeepChain-VST3-Windows
+          path: build/PeepChain_artefacts/Release/VST3/
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${{ github.ref_name }}" PeepChain-VST3-Windows.zip --title "PeepChain ${{ github.ref_name }}" --generate-notes
