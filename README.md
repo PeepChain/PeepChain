@@ -7,6 +7,8 @@ his Delay and Reverb sends) has been carefully recreated from the GarageBand ori
 side with GarageBand's own bounces, there's no audible difference. If you're on a Mac you already have this in
 GarageBand; PeepChain is for everyone else.
 
+**[Download](#install-windows)**
+
 ## How accurate is it?
 
 Subtracting GarageBand's output from PeepChain's leaves almost nothing behind:
