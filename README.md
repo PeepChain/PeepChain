@@ -9,6 +9,8 @@ GarageBand; PeepChain is for everyone else.
 
 **[Download](#install-windows)**
 
+![PeepChain](docs/peepchain-ui.png)
+
 ## How accurate is it?
 
 Subtracting GarageBand's output from PeepChain's leaves almost nothing behind:
@@ -22,8 +24,6 @@ Subtracting GarageBand's output from PeepChain's leaves almost nothing behind:
 
 In other words, no audible difference. For scale, GarageBand itself varies by about as much: the same audio
 through the same settings comes out about 32 dB different depending on which other effects are switched on.
-
-![PeepChain](docs/peepchain-ui.png)
 
 ## Hear it
 
