@@ -6,8 +6,17 @@
 
 const char* const PeepChainProcessor::stageParamIds[kStages] = {"gateOn", "compOn", "filterOn", "eqOn", "multiOn", "limitOn"};
 static const char* const kOrderProperty = "order";
+static const juce::Identifier kGroupIdProperty("groupId"), kGroupNameProperty("groupName");
 static const juce::Identifier kSlotProperty("abSlot"), kOtherSlotType("OtherSlot"), kSoundType("Sound"), kStepType("Step");
 static constexpr size_t kMaxUndoSteps = 100;
+
+// A NaN or inf from a broken plugin before this one is passed on as silence, bypassed or not.
+static float finiteOrZero(float v) { return std::isfinite(v) ? v : 0.0f; }
+// The settings can stack well over +100 dB of gain (Input, the Compressor's make-up, five Filter bands boosting
+// the same frequency, the EQ) with the Limiter off. Nothing real gets anywhere near this ceiling (+80 dB over full
+// scale), but past it the reverb's float maths would overflow and the output turn to NaN.
+static constexpr double kSafetyCeiling = 10000.0;
+static double safeLevel(double v) { return std::isfinite(v) ? juce::jlimit(-kSafetyCeiling, kSafetyCeiling, v) : 0.0; }
 
 uint32_t PeepChainProcessor::packOrder(const Order& o) {
     uint32_t v = 0;
@@ -38,9 +47,11 @@ PeepChainProcessor::PeepChainProcessor()
     for (const auto& d : EffectParams::all()) effectValues.push_back(apvts.getRawParameterValue(d.id));
     for (auto* prm : getParameters()) prm->addListener(this);
     committed = makeStep();
+    groupHub->add(this);
 }
 
 PeepChainProcessor::~PeepChainProcessor() {
+    groupHub->remove(this);
     stopTimer();
     cancelPendingUpdate();
     for (auto* prm : getParameters()) prm->removeListener(this);
@@ -262,7 +273,7 @@ void PeepChainProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mi
     {
         const int len = bypassDelay.getNumSamples();
         for (int i = 0; i < total; ++i) {
-            for (int c = 0; c < 2; ++c) bypassDelay.setSample(c, bypassPos, buffer.getSample(c < numIn ? c : 0, i));
+            for (int c = 0; c < 2; ++c) bypassDelay.setSample(c, bypassPos, finiteOrZero(buffer.getSample(c < numIn ? c : 0, i)));
             if (++bypassPos >= len) bypassPos = 0;
         }
     }
@@ -319,6 +330,7 @@ void PeepChainProcessor::processChunk(float* l, float* r, int numIn, int numOut,
         double f[2] = {x0 * gi, x1 * gi};
         pk.in = juce::jmax(pk.in, std::abs(f[0]), std::abs(f[1]));
         chain.processFrame(f);
+        f[0] = safeLevel(f[0]); f[1] = safeLevel(f[1]);
         dry[0][i] = f[0]; dry[1][i] = f[1];
         const double send = 0.5 * (f[0] + f[1]);                         // the sends were measured from a mono track
         rev[0][i] = (float)preDelay.process(send);                       // mono; the reverb turns it into stereo
@@ -351,7 +363,7 @@ void PeepChainProcessor::processChunk(float* l, float* r, int numIn, int numOut,
         if (gr != 0.0f) { f[0] += gr * rev[0][i]; f[1] += gr * rev[1][i]; }
         if (monoOut && (gd != 0.0f || gr != 0.0f)) f[0] = f[1] = 0.5 * (f[0] + f[1]);   // the sends are stereo; a mono output gets both sides
         autoGain.process(f, inPow[i], agOn);                                // loudness match (exactly 1 while off)
-        f[0] *= go; f[1] *= go;
+        f[0] = safeLevel(f[0] * go); f[1] = safeLevel(f[1] * go);
         pk.out = juce::jmax(pk.out, std::abs(f[0]), monoOut ? 0.0 : std::abs(f[1]));
         l[i] = (float)f[0];
         if (!monoOut) r[i] = (float)f[1];
@@ -366,7 +378,7 @@ void PeepChainProcessor::processBlockBypassed(juce::AudioBuffer<float>& buffer, 
     if (numIn < 1 || len < 1) { buffer.clear(); return; }
     for (int i = 0; i < n; ++i) {
         float in[2];
-        for (int c = 0; c < 2; ++c) in[c] = buffer.getSample(c < numIn ? c : 0, i);   // mono in: both sides get it
+        for (int c = 0; c < 2; ++c) in[c] = finiteOrZero(buffer.getSample(c < numIn ? c : 0, i));   // mono in: both sides get it
         for (int c = 0; c < chans; ++c) buffer.setSample(c, i, bypassDelay.getSample(c, bypassPos));
         for (int c = 0; c < 2; ++c) bypassDelay.setSample(c, bypassPos, in[c]);
         if (++bypassPos >= len) bypassPos = 0;
@@ -411,9 +423,12 @@ PeepChainProcessor::Order PeepChainProcessor::getOrder() const { return unpackOr
 
 void PeepChainProcessor::setOrder(const Order& o) {
     if (!PeepChain::isValidOrder(o.data()) || packOrder(o) == order.load()) return;
+    const bool record = suspendCommits == 0 && juce::MessageManager::existsAndIsCurrentThread();
+    if (record) commitUndoStep();                              // anything unrecorded first, as its own step
     order.store(packOrder(o));
+    markGroupChanged();
     updateHostDisplay(ChangeDetails().withNonParameterStateChanged(true));     // marks the session as changed
-    if (suspendCommits == 0 && juce::MessageManager::existsAndIsCurrentThread()) commitUndoStep();
+    if (record) commitUndoStep();
 }
 
 bool PeepChainProcessor::isPeepPreset() const {
@@ -464,6 +479,14 @@ void PeepChainProcessor::getStateInformation(juce::MemoryBlock& dest) {
         state.setProperty(kSlotProperty, activeSlot, nullptr);
         if (otherSlot.isValid()) { juce::ValueTree o(kOtherSlotType); o.addChild(otherSlot.createCopy(), -1, nullptr); state.addChild(o, -1, nullptr); }
     }
+    {
+        const juce::ScopedLock l(pendingLock);
+        const auto id = groupPending ? pendingGroupId : getGroupId();
+        if (id.isNotEmpty()) {
+            state.setProperty(kGroupIdProperty, id, nullptr);
+            state.setProperty(kGroupNameProperty, groupPending ? pendingGroupName : groupHub->nameOf(id), nullptr);
+        }
+    }
     if (auto xml = state.createXml()) copyXmlToBinary(*xml, dest);
 }
 
@@ -487,6 +510,35 @@ void PeepChainProcessor::setStateInformation(const void* data, int size) {
         if (other.isValid()) state.removeChild(other, nullptr);
     }
     state.removeProperty(kSlotProperty, nullptr);
+    // A damaged or hand-edited session can hold any value at all: each one back into its parameter's range
+    // (NaN or inf: Peep's value), so nothing out of range ever reaches the sound or is saved again.
+    for (auto child : state) {
+        if (!child.hasType("PARAM")) continue;
+        auto* prm = dynamic_cast<juce::RangedAudioParameter*>(apvts.getParameter(child.getProperty("id").toString()));
+        if (prm == nullptr) continue;
+        const auto& range = prm->getNormalisableRange();
+        const double v = (double)child.getProperty("value");
+        child.setProperty("value", std::isfinite(v) ? juce::jlimit((double)range.start, (double)range.end, v)
+                                                    : (double)prm->convertFrom0to1(prm->getDefaultValue()), nullptr);
+    }
+    {   // the other A/B slot holds normalised values
+        const juce::ScopedLock l(slotLock);
+        if (otherSlot.isValid())
+            for (int i = otherSlot.getNumProperties(); --i >= 0;) {
+                const auto name = otherSlot.getPropertyName(i);
+                if (name.toString() == kOrderProperty) continue;
+                const double v = (double)otherSlot.getProperty(name);
+                if (std::isfinite(v)) otherSlot.setProperty(name, juce::jlimit(0.0, 1.0, v), nullptr);
+                else otherSlot.removeProperty(name, nullptr);
+            }
+    }
+    {   // joined on the message thread
+        const juce::ScopedLock l(pendingLock);
+        groupPending = true;
+        pendingGroupId = state.getProperty(kGroupIdProperty).toString();
+        pendingGroupName = state.getProperty(kGroupNameProperty).toString();
+    }
+    state.removeProperty(kGroupIdProperty, nullptr); state.removeProperty(kGroupNameProperty, nullptr);
     apvts.replaceState(state);
     // A loaded session starts a fresh undo history.
     historyResetPending = true;
@@ -569,12 +621,22 @@ void PeepChainProcessor::redo() {
 }
 
 void PeepChainProcessor::parameterGestureChanged(int, bool starting) {
-    if (starting || suspendCommits > 0) return;
+    if (suspendCommits > 0) return;
+    // At the start of a change, whatever came in unrecorded (another track in the group, host automation) is
+    // recorded first, as its own step, so undoing this change doesn't undo that too.
+    if (starting) { if (juce::MessageManager::existsAndIsCurrentThread()) commitUndoStep(); return; }
     if (juce::MessageManager::existsAndIsCurrentThread()) commitUndoStep();
     else { commitPending = true; triggerAsyncUpdate(); }
 }
 
 void PeepChainProcessor::handleAsyncUpdate() {
+    juce::String id, name; bool pending;
+    { const juce::ScopedLock l(pendingLock); pending = std::exchange(groupPending, false); id = pendingGroupId; name = pendingGroupName; }
+    if (pending) {
+        ++suspendCommits;                                      // a loaded session's group is part of loading it, not a step
+        groupHub->rejoin(*this, id, name);
+        --suspendCommits;
+    }
     if (historyResetPending.exchange(false)) { undoStack.clear(); redoStack.clear(); committed = makeStep(); commitPending = false; }
     if (commitPending.exchange(false)) commitUndoStep();
 }
@@ -598,6 +660,57 @@ void PeepChainProcessor::copyToOtherSlot() {
     const auto live = soundState();
     const juce::ScopedLock l(slotLock);
     otherSlot = live;
+}
+
+//==============================================================================
+// groups
+void PeepChainProcessor::changeGroup(const std::function<void()>& change) {
+    JUCE_ASSERT_MESSAGE_THREAD
+    { const juce::ScopedLock l(pendingLock); groupPending = false; }
+    commitUndoStep();                                          // anything not yet recorded, before the sound may change
+    const auto before = soundState();
+    ++suspendCommits;
+    change();
+    --suspendCommits;
+    // Joining a group took on its sound. This track's older steps would push its old sound onto the whole group,
+    // so its history starts again from here.
+    if (!before.isEquivalentTo(soundState())) { undoStack.clear(); redoStack.clear(); committed = makeStep(); }
+}
+void PeepChainProcessor::createGroup(const juce::String& name) {
+    changeGroup([&] { groupHub->create(*this, name.isNotEmpty() ? name : groupHub->suggestName()); });
+}
+void PeepChainProcessor::joinGroup(const juce::String& id) { changeGroup([&] { groupHub->join(*this, id); }); }
+void PeepChainProcessor::leaveGroup() { changeGroup([&] { groupHub->leave(*this); }); }
+
+juce::ValueTree PeepChainProcessor::groupSound() const {
+    auto t = soundState();
+    for (auto* id : {"input", "output", "autoGain"}) t.removeProperty(id, nullptr);
+    return t;
+}
+
+void PeepChainProcessor::applyGroupSound(const juce::ValueTree& t) {
+    // Like applySound, but without gestures: the change was made on another track, so a host writing automation
+    // here shouldn't record it as if this track's knobs were touched. It isn't recorded as a step straight away
+    // either (a knob dragged on another track arrives here many times a second): what came in is recorded as one
+    // step the next time anything happens on this track, so undo here steps back through the group's changes too.
+    ++suspendCommits;
+    for (auto* prm : getParameters())
+        if (auto* wp = dynamic_cast<juce::AudioProcessorParameterWithID*>(prm); wp != nullptr && !isPerTrack(wp->paramID) && t.hasProperty(wp->paramID)) {
+            const float v = (float)t.getProperty(wp->paramID);
+            if (std::abs(prm->getValue() - v) >= 1e-7f) prm->setValueNotifyingHost(v);
+        }
+    const auto parts = juce::StringArray::fromTokens(t.getProperty(kOrderProperty).toString(), ",", "");
+    if (parts.size() == kStages) {
+        Order o;
+        for (int i = 0; i < kStages; ++i) o[(size_t)i] = parts[i].getIntValue();
+        setOrder(o);
+    }
+    --suspendCommits;
+}
+
+void PeepChainProcessor::updateTrackProperties(const TrackProperties& p) {
+    const juce::ScopedLock l(trackLock);
+    trackName = p.name.value_or(juce::String());
 }
 
 juce::AudioProcessorEditor* PeepChainProcessor::createEditor() { return new PeepChainEditor(*this); }

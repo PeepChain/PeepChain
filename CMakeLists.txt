@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.22)
 cmake_policy(SET CMP0091 NEW)   # honour CMAKE_MSVC_RUNTIME_LIBRARY
-project(PeepChain VERSION 0.2.0)
+project(PeepChain VERSION 0.2.1)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

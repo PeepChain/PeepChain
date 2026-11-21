@@ -100,8 +100,94 @@ private:
 };
 
 /**
+ * A newer release is out: its version, its release notes (from GitHub), DOWNLOAD (its page) and LATER (shown
+ * again next session; the header's notice reopens it meanwhile). Covers the whole window; clicking outside the
+ * card or Escape is LATER.
+ */
+class UpdatePopup : public juce::Component {
+public:
+    explicit UpdatePopup(const UpdateChecker::Release&);
+    std::function<void()> onDownload, onLater;
+    void paint(juce::Graphics&) override;
+    void resized() override;
+    void mouseDown(const juce::MouseEvent&) override;
+    void mouseUp(const juce::MouseEvent&) override;
+    void mouseMove(const juce::MouseEvent&) override;
+    void mouseExit(const juce::MouseEvent&) override;
+    bool keyPressed(const juce::KeyPress&) override;
+    enum Button { kDownload, kLater, kNumButtons };
+    juce::Rectangle<float> buttonBounds(int) const;
+    juce::Rectangle<float> cardBounds() const;
+    juce::String getNotesText() const { return notes.getText(); }
+private:
+    int buttonAt(juce::Point<float>) const;
+    void press(int);
+    UpdateChecker::Release release;
+    juce::TextEditor notes;
+    int pressed = -1, over = -1;
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(UpdatePopup)
+};
+
+/**
+ * Renames a group (from the pencil in the GROUP menu). Covers the whole window; Enter confirms, Escape or
+ * clicking outside the card cancels.
+ */
+class GroupNameDialog : public juce::Component {
+public:
+    explicit GroupNameDialog(const juce::String& name);
+    std::function<void(const juce::String&)> onConfirm;
+    std::function<void()> onCancel;
+    void paint(juce::Graphics&) override;
+    void resized() override;
+    void mouseDown(const juce::MouseEvent&) override;
+    void mouseUp(const juce::MouseEvent&) override;
+    void mouseMove(const juce::MouseEvent&) override;
+    void mouseExit(const juce::MouseEvent&) override;
+    bool keyPressed(const juce::KeyPress&) override;
+    void visibilityChanged() override;
+    enum Button { kConfirm, kCancel, kNumButtons };
+    juce::Rectangle<float> buttonBounds(int) const;
+    juce::Rectangle<float> cardBounds() const;
+    juce::TextEditor& getField() { return field; }
+    void confirm();
+private:
+    int buttonAt(juce::Point<float>) const;
+    juce::TextEditor field;
+    int pressed = -1, over = -1;
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(GroupNameDialog)
+};
+
+/**
+ * A group in the GROUP menu: its name (ticked when this track is in it). Clicking it joins the
+ * group; while it's under the mouse it shows a pencil (rename) and a trash can (delete) on the right.
+ */
+class GroupMenuItem : public juce::PopupMenu::CustomComponent {
+public:
+    enum Action { kJoin, kRename, kDelete };
+    GroupMenuItem(const GroupHub::Info&, bool current, std::function<void(Action)> onAction);
+    void getIdealSize(int& w, int& h) override;
+    void paint(juce::Graphics&) override;
+    void mouseMove(const juce::MouseEvent&) override;
+    void mouseExit(const juce::MouseEvent&) override;
+    void mouseUp(const juce::MouseEvent&) override;
+    juce::Rectangle<float> iconBounds(Action) const;            // kRename: the pencil, kDelete: the trash can
+    /** Tests: draw it as if hovered, with this icon under the mouse (-1: neither). */
+    void previewHover(int icon) { forcedHover = true; overIcon = icon; repaint(); }
+private:
+    int iconAt(juce::Point<float>) const;
+    GroupHub::Info info;
+    bool current, forcedHover = false;
+    int overIcon = -1;
+    std::function<void(Action)> onAction;
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(GroupMenuItem)
+};
+
+/**
  * Everything in the window, drawn at 860 x 562; the editor below scales it as a whole.
- *  - Header: logo, version, undo / redo, A / B, window size.
+ *  - Header: logo, version (and a newer one's notice, which opens its release notes), undo / redo, A / B, size.
+ *  - GROUP (left of Auto Gain): this PeepChain's group, if any (GroupSync.h). Its menu lists the groups (join one;
+ *    rename or delete one from its pencil and trash can), creates one ("Group <n>", with this track's settings) and
+ *    leaves this one.
  *  - Signal chain: one card per effect, in processing order. Its power button switches it on or off; clicking
  *    the card (or its EDIT, or right-clicking it) opens that effect's settings; dragging it sideways reorders.
  *  - Controls: six knobs (input, gate threshold, compressor threshold, delay, reverb, output), with SYNC and EDIT
@@ -130,6 +216,15 @@ public:
     juce::Rectangle<float> autoGainBounds() const;               // the Auto Gain switch, left of the reset capsule
     juce::Rectangle<float> githubBounds() const;                 // the GitHub button right of the version (empty when no repo is set)
     juce::Rectangle<float> updateBounds() const;                 // the "new version" notice under the title
+    juce::Rectangle<float> groupBounds() const;                  // GROUP, left of Auto Gain
+    /** Shows the newer release's notes (does nothing unless the update check found one). */
+    void showUpdatePopup();
+    UpdatePopup* getUpdatePopup() { return updatePopup.get(); }
+    /** Asks for a new name for a group. */
+    void showRenameDialog(const juce::String& groupId);
+    GroupNameDialog* getGroupNameDialog() { return nameDialog.get(); }
+    /** Called when GROUP is clicked (shows the group menu; tests may replace it). */
+    std::function<void()> onGroupClicked;
     juce::Rectangle<float> editBounds(int slot) const;           // EDIT at the bottom of a card (empty when that effect has no settings)
     juce::Rectangle<float> powerBounds(int slot) const;          // a card's on / off button
     /** Opens an effect's settings (or EffectParams::kSends: Delay & Reverb) in place of the big knobs (-1 closes them). */
@@ -185,6 +280,10 @@ private:
     void paintResetCapsule(juce::Graphics&);
     void paintAutoGainCapsule(juce::Graphics&);
     void paintVersion(juce::Graphics&);
+    void paintGroupButton(juce::Graphics&);
+    void showGroupMenu();
+    void closeUpdatePopup();
+    void closeGroupNameDialog();
     void paintControls(juce::Graphics&);
     void paintEditMarks(juce::Graphics&);
     void paintMetersAndFooter(juce::Graphics&);
@@ -205,6 +304,10 @@ private:
     juce::Slider input, gateThresh, compThresh, delayLevel, reverbLevel, output;
     juce::AudioProcessorValueTreeState::SliderAttachment inputAtt, gateAtt, compAtt, delayAtt, reverbAtt, outputAtt;
     std::unique_ptr<StagePanel> panel;
+    std::unique_ptr<UpdatePopup> updatePopup;
+    std::unique_ptr<GroupNameDialog> nameDialog;
+    bool updatePopupConsidered = false;                          // the automatic showing was decided on
+    juce::String groupShown;                                     // what GROUP says, as last painted
     juce::TooltipWindow tooltips{this, 900};
     juce::Image backdrop, chainLayer, liftedLayer;
     juce::uint64 chainKey = 0, lastPaintedKey = 0;
@@ -217,6 +320,7 @@ private:
     bool dragging = false, pressedReset = false, overReset = false;
     bool pressedAutoGain = false, overAutoGain = false, pressedUpdate = false, overUpdate = false;
     bool pressedGithub = false, overGithub = false;
+    bool pressedGroup = false, overGroup = false;
     int pressedControl = -1, overControl = -1;
     int pressedEdit = -1, overEdit = -1;                         // slot whose EDIT is pressed / under the mouse
     int overSlot = -1;                                           // card under the mouse

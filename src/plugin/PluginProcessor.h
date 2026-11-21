@@ -7,6 +7,7 @@
 #include "../dsp/AutoGain.h"
 #include "EffectParams.h"
 #include "ReverbConvolver.h"
+#include "GroupSync.h"
 #include <array>
 #include <atomic>
 
@@ -30,6 +31,8 @@
  *    and the sends' time, feedback, filters, pre-delay, length and width. All default to Peep's settings exactly.
  *  - Reverb sync (off by default): the reverb's pre-delay (Peep's is 58 ms) follows the song's tempo, staying
  *    the same part of a beat it is at 120 bpm.
+ *  - Group (none by default): PeepChains in the same named group share one sound (GroupSync.h). Everything above
+ *    is shared but input, output and Auto Gain, which stay with each track.
  *
  * Every change made in the editor can be undone and redone, and there are two settings slots (A and B) to
  * compare. Both live here rather than in the editor, so closing the window loses neither.
@@ -38,7 +41,7 @@
  * vocal is fed to both side by side and their output is added to it. The level knobs default to his send
  * amounts and go down to "off".
  */
-class PeepChainProcessor : public juce::AudioProcessor,
+class PeepChainProcessor : public juce::AudioProcessor, private GroupHub::Member,
                            private juce::AudioProcessorParameter::Listener, private juce::AsyncUpdater, private juce::Timer {
 public:
     static constexpr int kStages = PeepChain::kStages;
@@ -112,6 +115,20 @@ public:
     void selectSlot(int slot);
     /** Copies the live settings over the other slot. */
     void copyToOtherSlot();
+
+    // Groups (GroupSync.h): none to begin with. Creating one starts it with this instance's sound; joining one
+    // takes on its sound. Saved with the session. Message thread, but for getGroupId / getGroupName.
+    juce::String getGroupId() const { return groupHub->groupOf(*this); }      // empty: in no group
+    juce::String getGroupName() const { return groupHub->nameOf(getGroupId()); }
+    void createGroup(const juce::String& name = {});           // empty: GroupHub::suggestName()
+    void joinGroup(const juce::String& id);
+    void leaveGroup();
+    void renameGroup(const juce::String& id, const juce::String& name) { groupHub->rename(id, name); }
+    void deleteGroup(const juce::String& id) { groupHub->dissolve(id); }  // its tracks keep their sound
+    /** Parameters that stay with each track rather than being shared with its group. */
+    static bool isPerTrack(const juce::String& paramId) { return paramId == "input" || paramId == "output" || paramId == "autoGain"; }
+    void updateTrackProperties(const TrackProperties&) override;
+    GroupHub& getGroupHub() { return *groupHub; }
 
     /** The echo's current delay time, ms (500 unless synced to the host's tempo). */
     float getDelayMs() const { return delayMs.load(); }
@@ -206,7 +223,7 @@ private:
     void applySound(const juce::ValueTree&);
     juce::ValueTree makeStep() const;                  // the sound plus the A/B slots
     void restoreStep(const juce::ValueTree&);
-    void parameterValueChanged(int, float) override {}
+    void parameterValueChanged(int, float) override { markGroupChanged(); }
     void parameterGestureChanged(int, bool starting) override;
     void handleAsyncUpdate() override;
     std::vector<juce::ValueTree> undoStack, redoStack;
@@ -221,5 +238,18 @@ private:
     juce::CriticalSection slotLock;                    // getStateInformation may come from any thread
     int activeSlot = 0;
     juce::ValueTree otherSlot;                         // the inactive slot's sound (invalid until first used)
+
+    // groups
+    juce::ValueTree groupSound() const override;
+    void applyGroupSound(const juce::ValueTree&) override;
+    juce::String groupMemberName() const override { const juce::ScopedLock l(trackLock); return trackName; }
+    juce::SharedResourcePointer<GroupHub> groupHub;
+    void groupDetailsChanged() override { updateHostDisplay(ChangeDetails().withNonParameterStateChanged(true)); }
+    void changeGroup(const std::function<void()>&);
+    juce::CriticalSection pendingLock;                  // a loaded session's group, joined on the message thread
+    bool groupPending = false;
+    juce::String pendingGroupId, pendingGroupName;
+    juce::CriticalSection trackLock;
+    juce::String trackName;
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PeepChainProcessor)
 };

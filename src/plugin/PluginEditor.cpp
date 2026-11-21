@@ -21,6 +21,8 @@ const float kLayerMargin = 24.0f;                                 // room round 
 const char* const kStageNames[6] = {"GATE", "COMP", "FILTER", "EQ", "MULTI", "LIMIT"};
 }
 
+static juce::PropertiesFile::Options settingsFileOptions();        // the editor's own settings file (window size)
+
 // The built-in font (Inter, SIL Open Font License, assets/fonts/), so the window looks the same on every system.
 struct EmbeddedFonts {
     juce::Typeface::Ptr bold = juce::Typeface::createSystemTypefaceFor(BinaryData::InterBold_ttf, (size_t)BinaryData::InterBold_ttfSize);
@@ -222,6 +224,9 @@ PeepChainView::PeepChainView(PeepChainProcessor& p)
     reverbLevel.setTooltip("How much reverb is added. Its pre-delay, length, tone and width are under EDIT. Peep's send: -6.0. All the way down is off.");
     for (auto* s : {&delayLevel, &reverbLevel}) s->getProperties().set("offAtMinimum", true);
     output.setTooltip("Level after everything");
+    lnf.setColour(juce::ScrollBar::thumbColourId, Pal::grey().withAlpha(0.5f));   // the release notes' scroll bar
+    lnf.setColour(juce::ScrollBar::trackColourId, juce::Colours::transparentBlack);
+    onGroupClicked = [this] { showGroupMenu(); };
     setSize((int)kW, (int)kH);
     startTimerHz(30);
 }
@@ -235,6 +240,8 @@ void PeepChainView::resized() {
         knobs[i]->setBounds(RectF(kKnobSize, kKnobSize).withCentre({cx, kControlsArea.getY() + 34.0f + kKnobSize * 0.5f}).toNearestInt());
     }
     if (panel != nullptr) panel->setBounds(kPanelArea.toNearestInt());
+    if (updatePopup != nullptr) updatePopup->setBounds(getLocalBounds());
+    if (nameDialog != nullptr) nameDialog->setBounds(getLocalBounds());
     backdrop = {}; chainLayer = {};
 }
 
@@ -290,6 +297,7 @@ RectF PeepChainView::editBounds(int slot) const {
 }
 RectF PeepChainView::resetBounds() const { return {kW - kPad - 132.0f, kChainRowY, 132.0f, 22.0f}; }
 RectF PeepChainView::autoGainBounds() const { return {resetBounds().getX() - 12.0f - 150.0f, kChainRowY, 150.0f, 22.0f}; }
+RectF PeepChainView::groupBounds() const { return {autoGainBounds().getX() - 16.0f - 240.0f, kChainRowY, 240.0f, 22.0f}; }
 static constexpr float kVersionY = 18.0f;
 static juce::String versionText() { return "v" + UpdateChecker::currentVersion(); }
 static float versionX() { return wordmarkRight() + 12.0f; }
@@ -326,7 +334,9 @@ juce::String PeepChainView::getTooltip() {
         return "Auto Gain: turns the output down (or up) to the loudness of what comes in, so switching the plugin on "
                "and off compares the sound, not the volume. The number is the gain it applies. Off by default.";
     if (updateBounds().contains(lastMouse) && updates->getState() == UpdateChecker::State::available)
-        return "Open the download page for " + updates->getLatestVersion();
+        return "See what's new in " + updates->getLatestVersion() + " and download it";
+    if (groupBounds().contains(lastMouse))
+        return "Link PeepChain across tracks so they share settings";
     if (githubBounds().contains(lastMouse)) return "Open PeepChain on GitHub";
     for (int slot = 0; slot < kStages; ++slot) {
         if (!slotBounds(slot).contains(lastMouse)) continue;
@@ -412,6 +422,7 @@ void PeepChainView::openEditor(int stage) {
         };
         addAndMakeVisible(*panel);
         panel->setBounds(kPanelArea.toNearestInt());
+        if (updatePopup != nullptr) updatePopup->toFront(true);
     }
     for (auto* s : {&input, &gateThresh, &compThresh, &delayLevel, &reverbLevel, &output}) s->setVisible(panel == nullptr);
     repaint();
@@ -426,7 +437,7 @@ void PeepChainView::mouseDown(const juce::MouseEvent& e) {
         if (const int slot = slotAt(e.position); slot >= 0 && hasSettings(proc.getOrder()[(size_t)slot])) pressedEdit = slot;
     if (pressedEdit >= 0) {
         pressedSlot = dragToSlot = -1; dragging = false; dragDx = 0; pressedControl = -1;
-        pressedReset = pressedAutoGain = pressedUpdate = pressedGithub = false;
+        pressedReset = pressedAutoGain = pressedUpdate = pressedGithub = pressedGroup = false;
         return;
     }
     pressedSlot = slotAt(e.position); dragToSlot = pressedSlot; dragging = false; dragDx = 0;
@@ -435,6 +446,7 @@ void PeepChainView::mouseDown(const juce::MouseEvent& e) {
     pressedAutoGain = pressedSlot < 0 && autoGainBounds().contains(e.position);
     pressedUpdate = pressedSlot < 0 && updateBounds().contains(e.position) && updates->getState() == UpdateChecker::State::available;
     pressedGithub = pressedSlot < 0 && githubBounds().contains(e.position);
+    pressedGroup = pressedSlot < 0 && groupBounds().contains(e.position);
     pressedControl = pressedSlot < 0 ? controlAt(e.position) : -1;
 }
 
@@ -474,14 +486,16 @@ void PeepChainView::mouseUp(const juce::MouseEvent& e) {
             p->beginChangeGesture(); p->setValueNotifyingHost(p->getValue() > 0.5f ? 0.0f : 1.0f); p->endChangeGesture();
         }
     } else if (pressedUpdate && updateBounds().contains(e.position)) {
-        UpdateChecker::releasesPage().launchInDefaultBrowser();
+        showUpdatePopup();
+    } else if (pressedGroup && groupBounds().contains(e.position)) {
+        if (onGroupClicked) onGroupClicked();
     } else if (pressedGithub && githubBounds().contains(e.position)) {
         UpdateChecker::repoPage().launchInDefaultBrowser();
     } else if (pressedControl >= 0 && controlAt(e.position) == pressedControl) {
         activate(pressedControl);
     }
     pressedControl = -1; pressedEdit = -1; pressedPower = false;
-    pressedSlot = dragToSlot = -1; dragging = false; pressedReset = false; pressedAutoGain = false; pressedUpdate = false; pressedGithub = false; dragDx = 0;
+    pressedSlot = dragToSlot = -1; dragging = false; pressedReset = false; pressedAutoGain = false; pressedUpdate = false; pressedGithub = false; pressedGroup = false; dragDx = 0;
     mouseMove(e);
     repaint();
 }
@@ -495,6 +509,7 @@ void PeepChainView::mouseMove(const juce::MouseEvent& e) {
     overUpdate = updateBounds().contains(e.position) && updates->getState() == UpdateChecker::State::available;
     const bool wasOverGithub = std::exchange(overGithub, githubBounds().contains(e.position));
     if (overGithub != wasOverGithub) repaint(githubBounds().expanded(2.0f).toNearestInt());
+    if (std::exchange(overGroup, groupBounds().contains(e.position)) != overGroup) repaint(groupBounds().expanded(2.0f).toNearestInt());
     int edit = -1;
     for (int slot = 0; slot < kStages; ++slot) if (editBounds(slot).contains(e.position)) edit = slot;
     overEdit = edit;
@@ -504,12 +519,13 @@ void PeepChainView::mouseMove(const juce::MouseEvent& e) {
     const int wasOverControl = std::exchange(overControl, controlAt(e.position));
     if (overControl != wasOverControl) for (int c : {wasOverControl, overControl}) if (c >= 0) repaint(controlBounds(c).expanded(3.0f).toNearestInt());
     const bool clickable = (overSlot >= 0 && (hasSettings(proc.getOrder()[(size_t)overSlot]) || powerBounds(overSlot).contains(e.position)))
-                        || overReset || overAutoGain || overUpdate || overGithub || overControl >= 0;
+                        || overReset || overAutoGain || overUpdate || overGithub || overGroup || overControl >= 0;
     setMouseCursor(clickable ? juce::MouseCursor::PointingHandCursor : juce::MouseCursor::NormalCursor);
 }
 
 void PeepChainView::mouseExit(const juce::MouseEvent&) {
     for (int s : {std::exchange(overSlot, -1)}) if (s >= 0) repaint(slotBounds(s).expanded(6.0f).toNearestInt());
+    if (std::exchange(overGroup, false)) repaint(groupBounds().expanded(2.0f).toNearestInt());
     overEdit = -1;
 }
 
@@ -646,6 +662,16 @@ bool PeepChainView::updateCardShapes() {
 // the effect cards
 void PeepChainView::timerCallback() {
     updateMeters();
+    // A newer version: its notes pop up by themselves once per DAW session (in the first window to see it).
+    if (!updatePopupConsidered && updates->getState() == UpdateChecker::State::available) {
+        updatePopupConsidered = true;
+        if (updates->claimPopup()) showUpdatePopup();
+    }
+    {   // GROUP shows its name and how many tracks are in it, which other tracks can change
+        const auto id = proc.getGroupId();
+        const auto key = id + ":" + proc.getGroupName() + ":" + juce::String(proc.getGroupHub().memberCount(id));
+        if (key != groupShown) { groupShown = key; repaint(groupBounds().expanded(2.0f).toNearestInt()); }
+    }
     const auto key = stateKey();
     if (key != lastPaintedKey) { lastPaintedKey = key; lastControlsKey = controlsKey(); repaint(); return; }   // something was switched or moved: everything
     if (const auto ck = controlsKey(); ck != lastControlsKey) {                       // undo / redo available, A/B, sync
@@ -834,6 +860,402 @@ void PeepChainView::paintResetCapsule(juce::Graphics& g) {
     g.setColour(peep ? Pal::grey().withAlpha(0.4f) : Pal::pink()); g.fillPath(heart(hr));
 }
 
+/** Two links of a chain, for GROUP. */
+static void linkIcon(juce::Graphics& g, RectF r, juce::Colour c) {
+    juce::Path p;
+    const float w = r.getWidth() * 0.62f, h = r.getHeight() * 0.36f;
+    p.addRoundedRectangle(-w * 0.8f, -h * 0.5f, w, h, h * 0.5f);
+    p.addRoundedRectangle(-w * 0.2f, -h * 0.5f, w, h, h * 0.5f);
+    g.setColour(c);
+    g.strokePath(p, juce::PathStrokeType(1.4f), juce::AffineTransform::rotation(-kPi * 0.25f).translated(r.getCentreX(), r.getCentreY()));
+}
+
+void PeepChainView::paintGroupButton(juce::Graphics& g) {
+    const auto r = groupBounds();
+    const auto id = proc.getGroupId();
+    const bool in = id.isNotEmpty();
+    const auto ink = in ? (overGroup ? Pal::hot() : Pal::pink()) : overGroup ? Pal::hot() : Pal::grey();
+    g.setColour(Pal::bg().withAlpha(0.6f)); g.fillRoundedRectangle(r, 5.0f);
+    g.setColour(in ? ink.withAlpha(overGroup ? 1.0f : 0.7f) : overGroup ? Pal::hot() : Pal::edge().brighter(0.35f));
+    g.drawRoundedRectangle(r.reduced(0.5f), 5.0f, 1.0f);
+    linkIcon(g, RectF(14.0f, 14.0f).withCentre({r.getX() + 15.0f, r.getCentreY()}), ink);
+    auto text = r.withTrimmedLeft(28.0f).withTrimmedRight(22.0f).translated(0.0f, 0.5f);
+    g.setFont(labelFont(12.0f));
+    if (in) {                                                     // its name, and how many tracks are in it
+        const int n = proc.getGroupHub().memberCount(id);
+        const auto count = juce::String(n) + (n == 1 ? " TRACK" : " TRACKS");
+        const float countW = juce::GlyphArrangement::getStringWidth(labelFont(12.0f), count);
+        g.setColour(Pal::grey());
+        g.drawText(count, text.removeFromRight(countW), juce::Justification::centredRight, false);
+        g.setColour(ink);
+        g.drawText(proc.getGroupName().toUpperCase(), text.withTrimmedRight(10.0f), juce::Justification::centredLeft, true);
+    } else {
+        g.setColour(overGroup ? Pal::hot() : Pal::pale());
+        g.drawText("NO GROUP", text, juce::Justification::centredLeft, false);
+    }
+    juce::Path tri; const float tx = r.getRight() - 12.0f, ty = r.getCentreY();
+    tri.addTriangle(tx - 3.5f, ty - 1.8f, tx + 3.5f, ty - 1.8f, tx, ty + 2.6f);
+    g.setColour(overGroup ? Pal::hot() : Pal::grey()); g.fillPath(tri);
+}
+
+void PeepChainView::showGroupMenu() {
+    const auto current = proc.getGroupId();
+    const auto groups = proc.getGroupHub().list();
+    enum { kNew = 1, kLeave, kFirstGroup = 100 };
+    juce::PopupMenu m;
+    if (groups.empty()) m.addItem(-1, "No groups", false);
+    // A group's own clicks (join, pencil, trash) are acted on here, once the menu has closed.
+    auto act = [safe = juce::Component::SafePointer<PeepChainView>(this)](juce::String id, GroupMenuItem::Action a) {
+        juce::MessageManager::callAsync([safe, id, a] {
+            if (safe == nullptr) return;
+            if (a == GroupMenuItem::kJoin) safe->proc.joinGroup(id);              // takes on its settings
+            else if (a == GroupMenuItem::kRename) safe->showRenameDialog(id);
+            else safe->proc.deleteGroup(id);
+            safe->repaint();
+        });
+    };
+    for (size_t i = 0; i < groups.size(); ++i)
+        m.addCustomItem(kFirstGroup + (int)i,
+                        std::make_unique<GroupMenuItem>(groups[i], groups[i].id == current,
+                                                        [act, id = groups[i].id](GroupMenuItem::Action a) { act(id, a); }),
+                        nullptr, groups[i].name);
+    m.addSeparator();
+    m.addItem(kNew, "New group");
+    if (current.isNotEmpty()) m.addItem(kLeave, "Leave group");
+    const auto area = localAreaToGlobal(groupBounds()).toNearestInt();
+    m.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(this).withTargetScreenArea(area),
+                    [safe = juce::Component::SafePointer<PeepChainView>(this)](int result) {
+                        if (safe == nullptr) return;
+                        if (result == kNew) safe->proc.createGroup();
+                        else if (result == kLeave) safe->proc.leaveGroup();
+                        safe->repaint();
+                    });
+}
+
+//==============================================================================
+// a group in the GROUP menu
+GroupMenuItem::GroupMenuItem(const GroupHub::Info& i, bool isCurrent, std::function<void(Action)> f)
+    : CustomComponent(false), info(i), current(isCurrent), onAction(std::move(f)) {
+    setMouseCursor(juce::MouseCursor::PointingHandCursor);
+}
+
+void GroupMenuItem::getIdealSize(int& w, int& h) {
+    const auto font = getLookAndFeel().getPopupMenuFont();
+    w = juce::jlimit(180, 360, (int)juce::GlyphArrangement::getStringWidth(font, info.name) + 30 + 64);
+    h = juce::roundToInt(font.getHeight() * 1.9f);
+}
+
+RectF GroupMenuItem::iconBounds(Action a) const {
+    const auto b = getLocalBounds().toFloat();
+    const float s = b.getHeight() - 6.0f;
+    const float x = b.getRight() - 8.0f - (a == kDelete ? s : 2.0f * s + 4.0f);
+    return {x, b.getCentreY() - s * 0.5f, s, s};
+}
+
+int GroupMenuItem::iconAt(PointF p) const {
+    for (auto a : {kRename, kDelete}) if (iconBounds(a).contains(p)) return a;
+    return -1;
+}
+
+void GroupMenuItem::paint(juce::Graphics& g) {
+    auto& lf = getLookAndFeel();
+    const bool hot = isItemHighlighted() || forcedHover;
+    const auto b = getLocalBounds().toFloat();
+    if (hot) { g.setColour(findColour(juce::PopupMenu::highlightedBackgroundColourId)); g.fillRect(b.reduced(1.0f, 0.0f)); }
+    const auto text = hot ? findColour(juce::PopupMenu::highlightedTextColourId) : findColour(juce::PopupMenu::textColourId);
+    if (current) {                                                // ticked, as a normal menu item would be
+        g.setColour(text);
+        const auto tick = lf.getTickShape(1.0f);
+        g.fillPath(tick, tick.getTransformToScaleToFit(RectF(b.getHeight() * 0.42f, b.getHeight() * 0.42f).withCentre({b.getX() + 12.0f, b.getCentreY()}), true));
+    }
+    const auto font = lf.getPopupMenuFont();
+    auto area = b.withTrimmedLeft(26.0f).withTrimmedRight(hot ? b.getRight() - iconBounds(kRename).getX() + 6.0f : 8.0f);
+    g.setFont(font); g.setColour(text);
+    g.drawText(info.name, area, juce::Justification::centredLeft, true);
+    if (!hot) return;
+    for (auto a : {kRename, kDelete}) {                           // the pencil and the trash can
+        const auto r = iconBounds(a);
+        const bool over = overIcon == a;
+        if (over) { g.setColour(text.withAlpha(0.18f)); g.fillRoundedRectangle(r, 4.0f); }
+        const auto ink = over ? (a == kDelete ? juce::Colour(0xffff6b6b) : text) : text.withAlpha(0.75f);
+        const auto ic = r.reduced(r.getWidth() * 0.22f);
+        juce::Path p;
+        if (a == kRename) {
+            p.startNewSubPath(ic.getX(), ic.getBottom());          // a pencil leaning right: tip at the bottom left
+            p.lineTo(ic.getX() + ic.getWidth() * 0.12f, ic.getBottom() - ic.getHeight() * 0.34f);
+            p.lineTo(ic.getRight() - ic.getWidth() * 0.22f, ic.getY());
+            p.lineTo(ic.getRight(), ic.getY() + ic.getHeight() * 0.22f);
+            p.lineTo(ic.getX() + ic.getWidth() * 0.34f, ic.getBottom() - ic.getHeight() * 0.12f);
+            p.closeSubPath();
+            p.startNewSubPath(ic.getRight() - ic.getWidth() * 0.36f, ic.getY() + ic.getHeight() * 0.14f);
+            p.lineTo(ic.getRight() - ic.getWidth() * 0.14f, ic.getY() + ic.getHeight() * 0.36f);
+        } else {
+            const float x0 = ic.getX(), x1 = ic.getRight(), w = ic.getWidth(), y = ic.getY(), h = ic.getHeight();
+            p.startNewSubPath(x0, y + h * 0.18f); p.lineTo(x1, y + h * 0.18f);                     // the lid
+            p.startNewSubPath(x0 + w * 0.36f, y + h * 0.18f); p.lineTo(x0 + w * 0.36f, y);          // its handle
+            p.lineTo(x0 + w * 0.64f, y); p.lineTo(x0 + w * 0.64f, y + h * 0.18f);
+            p.startNewSubPath(x0 + w * 0.12f, y + h * 0.3f); p.lineTo(x0 + w * 0.2f, y + h);         // the can
+            p.lineTo(x0 + w * 0.8f, y + h); p.lineTo(x0 + w * 0.88f, y + h * 0.3f);
+            p.startNewSubPath(x0 + w * 0.4f, y + h * 0.42f); p.lineTo(x0 + w * 0.4f, y + h * 0.84f);
+            p.startNewSubPath(x0 + w * 0.6f, y + h * 0.42f); p.lineTo(x0 + w * 0.6f, y + h * 0.84f);
+        }
+        g.setColour(ink);
+        g.strokePath(p, juce::PathStrokeType(1.3f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+    }
+}
+
+void GroupMenuItem::mouseMove(const juce::MouseEvent& e) {
+    if (const int was = std::exchange(overIcon, iconAt(e.position)); was != overIcon) repaint();
+}
+
+void GroupMenuItem::mouseExit(const juce::MouseEvent&) { if (std::exchange(overIcon, -1) >= 0) repaint(); }
+
+void GroupMenuItem::mouseUp(const juce::MouseEvent& e) {
+    if (!getLocalBounds().toFloat().contains(e.position)) return;
+    const int icon = iconAt(e.position);
+    const auto action = icon == kRename ? kRename : icon == kDelete ? kDelete : kJoin;
+    auto f = onAction;                                            // the menu closes (and this goes) when it's triggered
+    triggerMenuItem();
+    if (f) f(action);
+}
+
+void PeepChainView::showRenameDialog(const juce::String& groupId) {
+    const auto current = proc.getGroupHub().nameOf(groupId);
+    if (current.isEmpty()) return;                                // (deleted meanwhile)
+    nameDialog = std::make_unique<GroupNameDialog>(current);
+    auto close = [safe = juce::Component::SafePointer<PeepChainView>(this)] {        // not from inside the dialog's own click
+        juce::MessageManager::callAsync([safe] { if (safe != nullptr) safe->closeGroupNameDialog(); });
+    };
+    nameDialog->onCancel = close;
+    nameDialog->onConfirm = [this, groupId, close](const juce::String& name) {
+        proc.renameGroup(groupId, name);                          // does nothing if it was deleted meanwhile
+        close();
+    };
+    addAndMakeVisible(*nameDialog);
+    nameDialog->setBounds(getLocalBounds());
+}
+
+void PeepChainView::closeGroupNameDialog() { nameDialog.reset(); repaint(); }
+
+//==============================================================================
+// naming a group
+namespace { const float kNameW = 400.0f, kNameH = 178.0f; }
+
+GroupNameDialog::GroupNameDialog(const juce::String& name) {
+    setWantsKeyboardFocus(true);
+    field.setColour(juce::TextEditor::backgroundColourId, Pal::well());
+    field.setColour(juce::TextEditor::outlineColourId, Pal::edge().brighter(0.3f));
+    field.setColour(juce::TextEditor::focusedOutlineColourId, Pal::pink());
+    field.setColour(juce::TextEditor::textColourId, Pal::pale());
+    field.setColour(juce::TextEditor::highlightColourId, Pal::pink().withAlpha(0.35f));
+    field.setColour(juce::TextEditor::highlightedTextColourId, Pal::pale());
+    field.setColour(juce::CaretComponent::caretColourId, Pal::pink());
+    field.setFont(plainLabelFont(16.0f));
+    field.setIndents(10, 7);
+    field.setInputRestrictions(GroupHub::kMaxNameLength);
+    field.setText(name, false);
+    field.onReturnKey = [this] { confirm(); };
+    field.onEscapeKey = [this] { if (onCancel) onCancel(); };
+    addAndMakeVisible(field);
+}
+
+void GroupNameDialog::visibilityChanged() {
+    if (!isShowing()) return;
+    juce::MessageManager::callAsync([safe = juce::Component::SafePointer<GroupNameDialog>(this)] {
+        if (safe != nullptr && safe->isShowing()) { safe->field.grabKeyboardFocus(); safe->field.selectAll(); }
+    });
+}
+
+RectF GroupNameDialog::cardBounds() const { return RectF(kNameW, kNameH).withCentre(getLocalBounds().toFloat().getCentre()); }
+
+RectF GroupNameDialog::buttonBounds(int b) const {
+    const auto c = cardBounds();
+    const float y = c.getBottom() - 20.0f - 28.0f;
+    auto textW = [](const char* t) { return juce::GlyphArrangement::getStringWidth(labelFont(12.0f), t) + 28.0f; };
+    const float ok = textW("RENAME"), no = textW("CANCEL");
+    switch (b) {
+        case kCancel:  return {c.getRight() - 22.0f - no, y, no, 28.0f};
+        case kConfirm: return {c.getRight() - 22.0f - no - 8.0f - ok, y, ok, 28.0f};
+        default:       return {};
+    }
+}
+
+void GroupNameDialog::resized() {
+    const auto c = cardBounds();
+    field.setBounds(RectF(c.getX() + 22.0f, c.getY() + 70.0f, c.getWidth() - 44.0f, 34.0f).toNearestInt());
+}
+
+void GroupNameDialog::paint(juce::Graphics& g) {
+    g.fillAll(juce::Colours::black.withAlpha(0.6f));
+    const auto c = cardBounds();
+    juce::Path shape; shape.addRoundedRectangle(c, 10.0f);
+    juce::DropShadow(juce::Colours::black.withAlpha(0.8f), 30, {0, 12}).drawForPath(g, shape);
+    card(g, c, 10.0f, Pal::edge().brighter(0.2f));
+    {
+        juce::Graphics::ScopedSaveState s(g); g.reduceClipRegion(shape);
+        g.setColour(Pal::pink()); g.fillRect(c.withHeight(3.0f));
+    }
+    g.setColour(Pal::pink()); g.setFont(labelFont(12.0f).withExtraKerningFactor(0.08f));
+    g.drawText("RENAME GROUP", RectF(c.getX() + 22.0f, c.getY() + 20.0f, 300.0f, 14.0f), juce::Justification::centredLeft, false);
+    g.setColour(Pal::grey()); g.setFont(plainLabelFont(13.0f));
+    g.drawFittedText("Every track in the group shows the new name.",
+                     RectF(c.getX() + 22.0f, c.getY() + 42.0f, c.getWidth() - 44.0f, 20.0f).toNearestInt(), juce::Justification::topLeft, 1, 1.0f);
+    button(g, buttonBounds(kConfirm), "RENAME", true, over == kConfirm);
+    button(g, buttonBounds(kCancel), "CANCEL", false, over == kCancel);
+}
+
+int GroupNameDialog::buttonAt(PointF p) const {
+    for (int b = 0; b < kNumButtons; ++b) if (buttonBounds(b).contains(p)) return b;
+    return -1;
+}
+
+void GroupNameDialog::mouseDown(const juce::MouseEvent& e) {
+    pressed = buttonAt(e.position);
+    if (pressed < 0 && !cardBounds().contains(e.position)) pressed = 100;          // outside the card: cancel
+}
+
+void GroupNameDialog::mouseUp(const juce::MouseEvent& e) {
+    const int was = std::exchange(pressed, -1);
+    if (was == 100 && !cardBounds().contains(e.position)) { if (onCancel) onCancel(); }
+    else if (was == kConfirm && buttonAt(e.position) == kConfirm) confirm();
+    else if (was == kCancel && buttonAt(e.position) == kCancel && onCancel) onCancel();
+}
+
+void GroupNameDialog::mouseMove(const juce::MouseEvent& e) {
+    if (const int was = std::exchange(over, buttonAt(e.position)); was != over) repaint();
+    setMouseCursor(over >= 0 ? juce::MouseCursor::PointingHandCursor : juce::MouseCursor::NormalCursor);
+}
+
+void GroupNameDialog::mouseExit(const juce::MouseEvent&) { if (std::exchange(over, -1) >= 0) repaint(); }
+
+bool GroupNameDialog::keyPressed(const juce::KeyPress& k) {
+    if (k == juce::KeyPress::escapeKey) { if (onCancel) onCancel(); return true; }
+    if (k == juce::KeyPress::returnKey) { confirm(); return true; }
+    return false;
+}
+
+void GroupNameDialog::confirm() { if (onConfirm) onConfirm(GroupHub::cleanName(field.getText())); }
+
+void PeepChainView::showUpdatePopup() {
+    if (updates->getState() != UpdateChecker::State::available) return;
+    if (updatePopup == nullptr) {
+        updatePopup = std::make_unique<UpdatePopup>(updates->getLatest());
+        auto later = [safe = juce::Component::SafePointer<PeepChainView>(this)] {        // not from inside the popup's own click
+            juce::MessageManager::callAsync([safe] { if (safe != nullptr) safe->closeUpdatePopup(); });
+        };
+        updatePopup->onLater = later;
+        updatePopup->onDownload = [this, later] { updates->latestPage().launchInDefaultBrowser(); later(); };
+        addAndMakeVisible(*updatePopup);
+        updatePopup->setBounds(getLocalBounds());
+    }
+    updatePopup->toFront(true);
+}
+
+void PeepChainView::closeUpdatePopup() { updatePopup.reset(); repaint(); }
+
+//==============================================================================
+// the newer release's notes
+namespace { const float kPopupW = 540.0f, kPopupH = 400.0f; }
+
+UpdatePopup::UpdatePopup(const UpdateChecker::Release& r) : release(r) {
+    setWantsKeyboardFocus(true);
+    notes.setMultiLine(true, true);
+    notes.setReadOnly(true);
+    notes.setCaretVisible(false);
+    notes.setScrollbarsShown(true);
+    notes.setPopupMenuEnabled(true);
+    notes.setColour(juce::TextEditor::backgroundColourId, Pal::well());
+    notes.setColour(juce::TextEditor::outlineColourId, juce::Colours::transparentBlack);
+    notes.setColour(juce::TextEditor::focusedOutlineColourId, juce::Colours::transparentBlack);
+    notes.setColour(juce::TextEditor::textColourId, Pal::pale());
+    notes.setColour(juce::TextEditor::highlightColourId, Pal::pink().withAlpha(0.35f));
+    notes.setColour(juce::TextEditor::highlightedTextColourId, Pal::pale());
+    notes.setFont(plainLabelFont(14.0f));
+    notes.setIndents(12, 10);
+    notes.setLineSpacing(1.25f);
+    const auto text = UpdateChecker::plainNotes(release.notes);
+    notes.setText(text.isNotEmpty() ? text : juce::String("No release notes were published for this version."), false);
+    notes.moveCaretToTop(false);
+    addAndMakeVisible(notes);
+}
+
+RectF UpdatePopup::cardBounds() const { return RectF(kPopupW, kPopupH).withCentre(getLocalBounds().toFloat().getCentre()); }
+
+RectF UpdatePopup::buttonBounds(int b) const {
+    const auto c = cardBounds();
+    const float y = c.getBottom() - 20.0f - 28.0f;
+    auto textW = [](const char* t) { return juce::GlyphArrangement::getStringWidth(labelFont(12.0f), t) + 28.0f; };
+    const float dl = textW("DOWNLOAD"), lt = textW("LATER");
+    switch (b) {
+        case kLater:     return {c.getRight() - 22.0f - lt, y, lt, 28.0f};
+        case kDownload:  return {c.getRight() - 22.0f - lt - 8.0f - dl, y, dl, 28.0f};
+        default:        return {};
+    }
+}
+
+void UpdatePopup::resized() {
+    const auto c = cardBounds();
+    notes.setBounds(RectF(c.getX() + 22.0f, c.getY() + 92.0f, c.getWidth() - 44.0f, c.getHeight() - 92.0f - 68.0f).toNearestInt());
+}
+
+void UpdatePopup::paint(juce::Graphics& g) {
+    g.fillAll(juce::Colours::black.withAlpha(0.6f));
+    const auto c = cardBounds();
+    juce::Path shape; shape.addRoundedRectangle(c, 10.0f);
+    juce::DropShadow(juce::Colours::black.withAlpha(0.8f), 30, {0, 12}).drawForPath(g, shape);
+    card(g, c, 10.0f, Pal::edge().brighter(0.2f));
+    {
+        juce::Graphics::ScopedSaveState s(g); g.reduceClipRegion(shape);
+        g.setColour(Pal::pink()); g.fillRect(c.withHeight(3.0f));
+    }
+    g.setColour(Pal::pink()); g.setFont(labelFont(12.0f).withExtraKerningFactor(0.08f));
+    g.drawText("NEW VERSION", RectF(c.getX() + 22.0f, c.getY() + 20.0f, 300.0f, 14.0f), juce::Justification::centredLeft, false);
+    g.setColour(Pal::pale()); g.setFont(PeepChainView::titleFont(26.0f));
+    auto tag = release.tag.trim();
+    if (!tag.startsWithIgnoreCase("v")) tag = "v" + tag;
+    g.drawText(tag, RectF(c.getX() + 22.0f, c.getY() + 36.0f, c.getWidth() - 44.0f, 30.0f), juce::Justification::centredLeft, false);
+    g.setColour(Pal::grey()); g.setFont(plainLabelFont(13.0f));
+    g.drawText("You have v" + UpdateChecker::currentVersion(), RectF(c.getX() + 22.0f, c.getY() + 66.0f, c.getWidth() - 44.0f, 16.0f), juce::Justification::centredLeft, true);
+    g.setColour(juce::Colours::black.withAlpha(0.35f));
+    g.drawRoundedRectangle(notes.getBounds().toFloat().expanded(0.5f), 4.0f, 1.0f);
+    button(g, buttonBounds(kLater), "LATER", false, over == kLater);
+    button(g, buttonBounds(kDownload), "DOWNLOAD", true, over == kDownload);
+}
+
+int UpdatePopup::buttonAt(PointF p) const {
+    for (int b = 0; b < kNumButtons; ++b) if (buttonBounds(b).contains(p)) return b;
+    return -1;
+}
+
+void UpdatePopup::mouseDown(const juce::MouseEvent& e) {
+    pressed = buttonAt(e.position);
+    if (pressed < 0 && !cardBounds().contains(e.position)) pressed = 100;          // outside the card: LATER
+}
+
+void UpdatePopup::mouseUp(const juce::MouseEvent& e) {
+    const int was = std::exchange(pressed, -1);
+    if (was == 100 && !cardBounds().contains(e.position)) press(kLater);
+    else if (was >= 0 && buttonAt(e.position) == was) press(was);
+}
+
+void UpdatePopup::mouseMove(const juce::MouseEvent& e) {
+    if (const int was = std::exchange(over, buttonAt(e.position)); was != over) repaint();
+    setMouseCursor(over >= 0 ? juce::MouseCursor::PointingHandCursor : juce::MouseCursor::NormalCursor);
+}
+
+void UpdatePopup::mouseExit(const juce::MouseEvent&) { if (std::exchange(over, -1) >= 0) repaint(); }
+
+bool UpdatePopup::keyPressed(const juce::KeyPress& k) {
+    if (k == juce::KeyPress::escapeKey) { press(kLater); return true; }
+    if (k == juce::KeyPress::returnKey) { press(kDownload); return true; }
+    return false;
+}
+
+void UpdatePopup::press(int b) {
+    auto& f = b == kDownload ? onDownload : onLater;
+    if (f) f();
+}
+
 void PeepChainView::paintAutoGainCapsule(juce::Graphics& g) {
     const auto r = autoGainBounds();
     const bool on = proc.apvts.getRawParameterValue("autoGain")->load() > 0.5f;
@@ -868,7 +1290,7 @@ void PeepChainView::paintVersion(juce::Graphics& g) {
     if (updates->getState() == UpdateChecker::State::available) {
         const auto r = updateBounds();
         g.setColour(overUpdate ? Pal::hot() : Pal::pink()); g.setFont(labelFont(12.0f));
-        g.drawText("NEW VERSION " + updates->getLatestVersion().toUpperCase() + "  -  GET IT", r, juce::Justification::centredLeft, false);
+        g.drawText("NEW VERSION " + updates->getLatestVersion().toUpperCase() + "  -  WHAT'S NEW", r, juce::Justification::centredLeft, false);
     }
 }
 
@@ -957,6 +1379,7 @@ void PeepChainView::paint(juce::Graphics& g) {
 
     paintResetCapsule(g);
     paintAutoGainCapsule(g);
+    paintGroupButton(g);
     paintVersion(g);
     paintControls(g);
     paintChain(g);
