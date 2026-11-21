@@ -25,12 +25,7 @@ public:
     };
     void prepare(double sampleRate, const Settings& s, int channels = 2) {
         sr_ = sampleRate; ch_ = channels; s_ = s;
-        open_ = std::pow(10.0, s.thresholdDb / 20.0);
-        close_ = std::pow(10.0, (s.thresholdDb + s.hysteresisDb) / 20.0);
-        floor_ = std::pow(10.0, s.reductionDb / 20.0);
-        attackStep_ = 1.0 / (std::floor(s.attackMs * 1e-3 * sr_) + 1.0);
-        releaseMul_ = std::pow(10.0, -1.0 / (s.releaseMs * 1e-3 * sr_));
-        holdSamples_ = (long)std::lround(s.holdMs * 1e-3 * sr_);
+        setLevelsAndTimes(s);
         look_ = std::max(0, (int)std::floor(s.lookaheadMs * 1e-3 * sr_));
         envMul_ = s.detectorFallMs > 0 ? std::exp(-1.0 / (s.detectorFallMs * 1e-3 * sr_)) : 0.0;
         delay_.assign((size_t)std::max(look_, 1) * ch_, 0.0);
@@ -42,6 +37,17 @@ public:
     }
     int getLatency() const { return look_; }
     double getGain() const { return gain_; }
+    /** Everything but the look-ahead and the detector, while running (real-time safe). */
+    void setLevelsAndTimes(const Settings& s) {
+        s_.thresholdDb = s.thresholdDb; s_.hysteresisDb = s.hysteresisDb; s_.reductionDb = s.reductionDb;
+        s_.attackMs = s.attackMs; s_.holdMs = s.holdMs; s_.releaseMs = s.releaseMs;
+        open_ = std::pow(10.0, s.thresholdDb / 20.0);
+        close_ = std::pow(10.0, (s.thresholdDb + s.hysteresisDb) / 20.0);
+        floor_ = std::pow(10.0, s.reductionDb / 20.0);
+        attackStep_ = 1.0 / (std::floor(s.attackMs * 1e-3 * sr_) + 1.0);
+        releaseMul_ = std::pow(10.0, -1.0 / (std::max(s.releaseMs, 1e-3) * 1e-3 * sr_));
+        holdSamples_ = (long)std::lround(s.holdMs * 1e-3 * sr_);
+    }
     /** Move the threshold while running (the hysteresis point moves with it). */
     void setThresholdDb(double db) {
         if (db == s_.thresholdDb) return;

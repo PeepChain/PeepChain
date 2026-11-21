@@ -3,7 +3,10 @@
 #include <juce_dsp/juce_dsp.h>
 #include "../dsp/PeepChain.h"
 #include "../dsp/SendDelay.h"
+#include "../dsp/PreDelay.h"
 #include "../dsp/AutoGain.h"
+#include "EffectParams.h"
+#include "ReverbConvolver.h"
 #include <array>
 #include <atomic>
 
@@ -12,7 +15,7 @@
  * Noise Gate -> Compressor -> AUFilter -> AUGraphicEQ -> AUMultibandCompressor -> AUPeakLimiter,
  * all at Lil Peep's settings. That is the default and it is what was verified.
  *
- * What can be changed is only what depends on the take rather than on the sound:
+ * What can be changed:
  *  - input / output level (the chain's thresholds are absolute levels),
  *  - the Noise Gate and Compressor thresholds,
  *  - each of the six effects on / off, and their order,
@@ -21,6 +24,12 @@
  *    and off compares the sound rather than the level.
  *  - Delay sync (off by default): the echo follows the song's tempo (a quarter note) instead of Peep's fixed
  *    500 ms, which is a quarter note at GarageBand's default 120 bpm.
+ *  - the effects' own settings (EffectParams.h): all of AUFilter and AUGraphicEQ, AUMultibandCompressor's
+ *    crossovers, thresholds, headrooms and times, AUPeakLimiter's pre-gain and release (all checked against
+ *    Apple's Audio Units at any value), the Noise Gate's levels and times, the Compressor's times and make-up,
+ *    and the sends' time, feedback, filters, pre-delay, length and width. All default to Peep's settings exactly.
+ *  - Reverb sync (off by default): the reverb's pre-delay (Peep's is 58 ms) follows the song's tempo, staying
+ *    the same part of a beat it is at 120 bpm.
  *
  * Every change made in the editor can be undone and redone, and there are two settings slots (A and B) to
  * compare. Both live here rather than in the editor, so closing the window loses neither.
@@ -30,7 +39,7 @@
  * amounts and go down to "off".
  */
 class PeepChainProcessor : public juce::AudioProcessor,
-                           private juce::AudioProcessorParameter::Listener, private juce::AsyncUpdater {
+                           private juce::AudioProcessorParameter::Listener, private juce::AsyncUpdater, private juce::Timer {
 public:
     static constexpr int kStages = PeepChain::kStages;
     using Order = std::array<int, kStages>;            // order[slot] = stage
@@ -39,6 +48,12 @@ public:
     static constexpr float kSendOffDb = -60.0f;        // bottom of a send knob: off
     /** False until the reverb has been measured from GarageBand and its impulse response built in. */
     static bool hasReverb();
+    /** The reverb's impulse response at 44.1 kHz without its silent first kIrTrim samples (decoded once per
+     *  process and shared by every instance). Empty without a built-in reverb. */
+    static const juce::AudioBuffer<float>& reverbResponse();
+    /** The reverb convolution's block size (= its latency) at a sample rate: the largest power of two (64 .. 1024)
+     *  that fits in the shortest pre-delay sync can ask for, so the pre-delay line can always absorb it. */
+    static int reverbBlockFor(double sampleRate);
     static const char* const stageParamIds[kStages];   // on/off parameter of each stage
 
     PeepChainProcessor();
@@ -56,7 +71,7 @@ public:
     const juce::String getName() const override { return "PeepChain"; }
     bool acceptsMidi() const override { return false; }
     bool producesMidi() const override { return false; }
-    double getTailLengthSeconds() const override { return 6.0; }       // echoes and reverb ring on after the vocal stops
+    double getTailLengthSeconds() const override;      // echoes and reverb ring on after the vocal stops
     int getNumPrograms() override { return 1; }
     int getCurrentProgram() override { return 0; }
     void setCurrentProgram(int) override {}
@@ -69,9 +84,16 @@ public:
     Order getOrder() const;
     void setOrder(const Order&);
     bool isStageOn(int stage) const { return stageOn[(size_t)stage]->load() > 0.5f; }
+    /** The effects' own settings as they are now (for the editor's pictures of them). */
+    PeepChain::Settings effectSettings() const { PeepChain::Settings s; readEffects(s); return s; }
+    EffectParams::Sends sendSettings() const { PeepChain::Settings s; EffectParams::Sends d; readEffects(s, &d); return d; }
+    /** True when one effect's own settings (EffectParams, stage or EffectParams::kSends) are all Peep's. */
+    bool isStageAtPeep(int stage) const;
+    /** Puts one effect's own settings back to Peep's (one undo step). */
+    void resetStageToPeep(int stage);
     /** True when everything that shapes the sound is exactly as in Peep's preset (levels aside). */
     bool isPeepPreset() const;
-    /** Back to Peep's preset: his order, all six effects on, his two thresholds and send amounts, delay sync off.
+    /** Back to Peep's preset: his order, all six effects on, his two thresholds and send amounts, both syncs off.
         Leaves input / output and Auto Gain alone. One undo step. */
     void resetToPeep();
 
@@ -93,6 +115,9 @@ public:
 
     /** The echo's current delay time, ms (500 unless synced to the host's tempo). */
     float getDelayMs() const { return delayMs.load(); }
+    /** The reverb's current pre-delay, ms (Peep's 58 unless synced to the host's tempo). */
+    float getReverbPreDelayMs() const { return reverbPreDelayMs.load(); }
+    static constexpr double kPeepBpm = 120.0;          // the tempo both syncs scale from (GarageBand's default)
 
     juce::AudioProcessorValueTreeState apvts;
 
@@ -106,7 +131,14 @@ public:
         std::atomic<float> autoGainDb{0.f};          // gain Auto Gain applies now (or would apply, while off), dB
         std::atomic<bool> autoGainOn{false};
         std::atomic<uint32_t> blocks{0};             // counts processed blocks, so the editor can tell when audio has stopped
-        Meters() { for (auto& b : bandDb) b = 0.f; }
+        // For the Compressor and Limiter pictures: the highest value since the editor last took it (take()).
+        std::atomic<float> compLevelDb{-120.f}, compGrDb{0.f};          // detector level (RMS dBFS), gain reduction
+        std::atomic<float> limInDb{-120.f}, limOutDb{-120.f}, limGrDb{0.f};   // peaks in (after pre-gain) / out, gain reduction
+        std::atomic<float> gateInDb{-120.f}, gateGrDb{0.f};                 // peak going into the gate, how far it is closed
+        std::atomic<float> bandLevelDb[4];                                  // multiband detector levels (the thresholds' scale)
+        static void hold(std::atomic<float>& a, float v) { if (v > a.load(std::memory_order_relaxed)) a.store(v, std::memory_order_relaxed); }
+        static float take(std::atomic<float>& a, float rest) { return a.exchange(rest, std::memory_order_relaxed); }
+        Meters() { for (auto& b : bandDb) b = 0.f; for (auto& b : bandLevelDb) b = -120.f; }
     } meters;
 
 private:
@@ -115,7 +147,11 @@ private:
     static Order unpackOrder(uint32_t);
     PeepChain::Settings currentSettings() const;
     void applyControls();
-    struct Peaks { double in = 0, out = 0, gateMin = 1, comp = 0, lim = 0, band[4] = {0, 0, 0, 0}; };
+    // Gains are collected as their lowest linear value (no log per sample) and turned into dB reductions once a block.
+    struct Peaks {
+        double in = 0, out = 0, gateMin = 1, compMin = 1, limMin = 1, bandMin[4] = {1, 1, 1, 1}, bandMs[4] = {0, 0, 0, 0};
+        static double reductionDb(double gainMin) { return gainMin < 1.0 ? -20.0 * std::log10(gainMin) : 0.0; }
+    };
     void processChunk(float* l, float* r, int numIn, int numOut, int n, Peaks&);
 
     PeepChain chain;
@@ -123,16 +159,37 @@ private:
     std::atomic<float>* gateThreshold = nullptr; std::atomic<float>* compThreshold = nullptr;
     std::atomic<float>* delayLevel = nullptr; std::atomic<float>* reverbLevel = nullptr;
     std::atomic<float>* autoGainOn = nullptr;
+    std::vector<std::atomic<float>*> effectValues;      // EffectParams::all(), in order
+    void readEffects(PeepChain::Settings&, EffectParams::Sends* = nullptr) const;
+    EffectParams::Sends sends;                         // as last applied (audio thread)
+    void applySends(const EffectParams::Sends&, bool force);
     AutoGain autoGain;
     juce::AudioBuffer<double> inPowerBuf;              // K-weighted input power per sample, for Auto Gain
     static float sendGain(float knobDb, float unityAtDb);
-    static constexpr double kMaxDelaySeconds = 2.0;    // a quarter note at 30 bpm
-    int delaySamplesNow();                             // from the host's tempo when synced (audio thread)
+    static constexpr double kMaxDelaySeconds = 4.0;    // a half note at 30 bpm
+    double songBpm();                                  // the host's tempo, 0 when it doesn't say (audio thread)
+    int delaySamplesNow(double bpm);                   // from the host's tempo when synced
     std::atomic<float>* delaySync = nullptr;
     std::atomic<float> delayMs{500.0f};
+    // The reverb's impulse response starts kIrOnset samples (58 ms) in: that is its pre-delay. The first
+    // kIrTrim samples (all below -150 dB of its peak) are cut off when it's loaded and a delay line of the same
+    // length plays them instead, so that gap can follow the tempo. 2499 = 17 x 147, which is also a whole number
+    // of samples at 48 kHz (2720) and their multiples, so where JUCE resamples the response nothing shifts.
+    static constexpr int kIrOnset = 2573, kIrTrim = 2499;
+    static constexpr double kIrRate = 44100.0;
+    static constexpr double kMaxPreDelaySeconds = 1.0;  // the longest pre-delay (250 ms) at 30 bpm
+    int preDelaySamplesNow(double bpm);
+    std::atomic<float>* reverbSync = nullptr;
+    std::atomic<float> reverbPreDelayMs{(float)(1000.0 * kIrOnset / kIrRate)};
+    PreDelay preDelay;
     double sampleRateNow = 44100.0;
     SendDelay delay;
-    juce::dsp::Convolution reverb{juce::dsp::Convolution::NonUniform{1024}};   // zero latency
+    ReverbConvolver reverb;                            // runs reverbLatency samples late; the pre-delay line is that much shorter
+    int reverbLatency = 0;
+    juce::CriticalSection reverbLock;                  // prepareToPlay vs the timer reshaping the reverb
+    ReverbConvolver::Shape reverbShape() const;        // from the Reverb settings
+    void timerCallback() override;                     // reshapes the reverb when its settings change (message thread)
+    juce::SmoothedValue<float> reverbWidth;
     juce::AudioBuffer<double> dryBuf; juce::AudioBuffer<float> delayBuf, reverbBuf;
     juce::SmoothedValue<float> delayGain, reverbGain;
     bool reverbIdle = true;

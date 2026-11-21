@@ -55,7 +55,7 @@ public:
     }
 
     void prepare(double sampleRate, const Settings& s) {
-        s_ = s;
+        s_ = s; sr_ = sampleRate;
         if (!isValidOrder(s_.order)) for (int i = 0; i < kStages; ++i) s_.order[i] = i;
         gate_.prepare(sampleRate, s.gate, 2);
         comp_.prepare(sampleRate, s.comp, s.compFit, 2);
@@ -100,6 +100,29 @@ public:
     bool isEnabled(int stage) const { return s_.enable[stage]; }
     void setGateThresholdDb(double db) { s_.gate.thresholdDb = db; gate_.setThresholdDb(db); }
     void setCompressorThresholdDb(double db) { s_.comp.thresholdDb = db; comp_.setThresholdDb(db); }
+    /** The plugin's editable settings, while running: the Noise Gate's levels and times (not its threshold or
+     *  look-ahead), the Compressor's times and make-up, all of AUFilter and AUGraphicEQ,
+     *  AUMultibandCompressor's crossovers, thresholds, headrooms and times, AUPeakLimiter's pre-gain and release.
+     *  Only what differs from the current settings is touched (no allocation). Everything else in s is ignored. */
+    void setEffectSettings(const Settings& s) {
+        if (!sameGate(s.gate, s_.gate)) {
+            const double thr = s_.gate.thresholdDb;                 // the threshold has its own setter
+            s_.gate = s.gate; s_.gate.thresholdDb = thr;
+            gate_.setLevelsAndTimes(s_.gate);
+        }
+        if (s.comp.attackMs != s_.comp.attackMs || s.comp.releaseMs != s_.comp.releaseMs) {
+            s_.comp.attackMs = s.comp.attackMs; s_.comp.releaseMs = s.comp.releaseMs; comp_.setTimes(s.comp.attackMs, s.comp.releaseMs);
+        }
+        if (s.comp.makeupDb != s_.comp.makeupDb) { s_.comp.makeupDb = s.comp.makeupDb; comp_.setMakeupDb(s.comp.makeupDb); }
+        if (!sameFilter(s.filter, s_.filter)) { s_.filter = s.filter; for (auto& f : filter_) f.set(sr_, s.filter); }
+        if (!std::equal(s.geqGains, s.geqGains + GraphicEQ31::kBands, s_.geqGains)) {
+            std::copy(s.geqGains, s.geqGains + GraphicEQ31::kBands, s_.geqGains);
+            for (auto& q : geq_) q.set(sr_, s.geqGains);
+        }
+        if (!sameMultiband(s.multiband, s_.multiband)) { s_.multiband = s.multiband; mb_.setSettings(s.multiband); }
+        if (s.limiterRelease != s_.limiterRelease) { s_.limiterRelease = s.limiterRelease; limiter_.setRelease(s.limiterRelease); }
+        if (s.limiterPregainDb != s_.limiterPregainDb) { s_.limiterPregainDb = s.limiterPregainDb; limiter_.setPregainDb(s.limiterPregainDb); }
+    }
     /** Ask for a new order (order[slot] = stage). In live mode it is applied behind a short dip to silence. */
     void setOrder(const int* order) {
         if (!isValidOrder(order)) return;
@@ -116,6 +139,22 @@ public:
     double compressorReductionDb() const { return comp_.getGainReductionDb(); }
     double bandReductionDb(int band) const { return mb_.getGainReduction(band); }
     double limiterReductionDb() const  { return limiter_.getGainReductionDb(); }
+    /** The same three as linear gains (<= 1), which cost nothing to read every sample: the lowest over a block,
+     *  converted to dB once, is the block's most reduction. */
+    double compressorGain() const      { return comp_.getGainLinear(); }
+    double bandGain(int band) const    { return mb_.getGainLinear(band); }
+    double limiterGain() const         { return limiter_.getGain(); }
+    double compressorLevelDb() const   { return comp_.getLevelDb(); }
+    /** Peaks going into the limiter (after its pre-gain) and coming out of it since the last resetLimiterPeaks()
+     *  (linear; for the editor's picture of the limiter). */
+    double limiterInPeak() const  { return limIn_; }
+    double limiterOutPeak() const { return limOut_; }
+    void resetLimiterPeaks() { limIn_ = limOut_ = 0.0; }
+    /** Peak going into the gate since the last resetGatePeak() (linear; for the editor's picture of the gate). */
+    double gateInPeak() const { return gateIn_; }
+    void resetGatePeak() { gateIn_ = 0.0; }
+    /** A multiband band's detector level now (mean square, the band's own threshold scale is 10 log10(2 ms)). */
+    double bandMeanSquare(int band) const { return mb_.getMeanSquare(band); }
 
     void processFrame(double* io) {
         if (!s_.liveSwitching) {
@@ -157,20 +196,42 @@ public:
     }
 
 private:
+    static bool sameGate(const NoiseGate::Settings& a, const NoiseGate::Settings& b) {
+        return a.hysteresisDb == b.hysteresisDb && a.reductionDb == b.reductionDb && a.attackMs == b.attackMs
+            && a.holdMs == b.holdMs && a.releaseMs == b.releaseMs;
+    }
+    static bool sameFilter(const AUFilterEQ::Settings& a, const AUFilterEQ::Settings& b) {
+        if (a.lowIsCut != b.lowIsCut || a.lowFreq != b.lowFreq || a.lowGain != b.lowGain) return false;
+        if (a.highIsCut != b.highIsCut || a.highFreq != b.highFreq || a.highGain != b.highGain) return false;
+        for (int i = 0; i < 3; ++i) if (a.freq[i] != b.freq[i] || a.gain[i] != b.gain[i] || a.bw[i] != b.bw[i]) return false;
+        return true;
+    }
+    static bool sameMultiband(const MultibandSettings& a, const MultibandSettings& b) {
+        if (a.attackTime != b.attackTime || a.releaseTime != b.releaseTime || a.pregainDb != b.pregainDb || a.postgainDb != b.postgainDb) return false;
+        for (int i = 0; i < 3; ++i) if (a.crossover[i] != b.crossover[i]) return false;
+        for (int i = 0; i < 4; ++i) if (a.threshold[i] != b.threshold[i] || a.headroom[i] != b.headroom[i]) return false;
+        return true;
+    }
     void runStage(int st, double* io) {
         switch (st) {
-            case kGate:   gate_.processFrame(io); break;
+            case kGate:   gateIn_ = std::max(gateIn_, std::max(std::fabs(io[0]), std::fabs(io[1]))); gate_.processFrame(io); break;
             case kComp:   comp_.processFrame(io); break;
             case kFilter: for (int c = 0; c < 2; ++c) if (!(c == 0 && s_.filterLeftBypassed)) io[c] = filter_[c].process(io[c]); break;
             case kGeq:    for (int c = 0; c < 2; ++c) io[c] = geq_[c].process(io[c]); break;
             case kMulti:  mb_.processFrame(io, 2); break;
-            case kLimit:  limiter_.processFrame(io); break;
+            case kLimit:
+                limIn_ = std::max(limIn_, std::max(std::fabs(io[0]), std::fabs(io[1])) * limiter_.getPregain());
+                limiter_.processFrame(io);
+                limOut_ = std::max(limOut_, std::max(std::fabs(io[0]), std::fabs(io[1])));
+                break;
             default: break;
         }
     }
     enum FadeState { kSteady, kFadeOut, kMuted, kFadeIn };
 
     Settings s_;
+    double sr_ = 44100.0;
+    double limIn_ = 0.0, limOut_ = 0.0, gateIn_ = 0.0;
     NoiseGate gate_; Compressor comp_; AUFilterEQ filter_[2]; GraphicEQ31 geq_[2]; MultibandCore mb_; PeakLimiter limiter_;
     int stageLatency_[kStages] = {0, 0, 0, 0, 0, 0};
     std::vector<double> dry_[kStages]; int dryPos_[kStages] = {0, 0, 0, 0, 0, 0};

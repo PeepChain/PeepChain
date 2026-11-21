@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.22)
 cmake_policy(SET CMP0091 NEW)   # honour CMAKE_MSVC_RUNTIME_LIBRARY
-project(PeepChain VERSION 0.1.0)
+project(PeepChain VERSION 0.2.0)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -39,10 +39,10 @@ set(PLUGIN_DEFS JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_VST3_CAN_REPLACE_VST2=0 
     PEEPCHAIN_VERSION="${PROJECT_VERSION}" PEEPCHAIN_GITHUB_REPO="${PEEPCHAIN_GITHUB_REPO}")
 
 # The reverb send is its measured impulse response, built into the plugin.
-# The editor's two fonts are built in too (SIL Open Font License, see assets/fonts/*-OFL.txt), so it looks the
-# same on every system: Almendra for the title, Barlow Condensed SemiBold for all the lettering.
+# The editor's font is built in too (Inter, SIL Open Font License, see assets/fonts/Inter-OFL.txt), so it looks
+# the same on every system: SemiBold for the lettering, Bold for the name.
 juce_add_binary_data(PeepChainData SOURCES assets/sends/reverb_ir.wav
-                     assets/fonts/Almendra-Regular.ttf assets/fonts/BarlowCondensed-SemiBold.ttf)
+                     assets/fonts/Inter-SemiBold.ttf assets/fonts/Inter-Bold.ttf)
 set_target_properties(PeepChainData PROPERTIES POSITION_INDEPENDENT_CODE TRUE)
 list(APPEND PLUGIN_DEFS PEEPCHAIN_HAS_REVERB=1)
 

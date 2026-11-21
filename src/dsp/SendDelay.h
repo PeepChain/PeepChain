@@ -21,8 +21,9 @@
  *    track's Echo send): -13.4 dB, i.e. about 3 dB more than the send figure.
  * Mono in, the same signal on both sides out. No latency.
  *
- * The delay time can also be changed while it runs (the plugin's tempo sync): prepare() with room for the
- * longest time, then setDelaySamples(). The read point glides over to the new time in 20 ms so it doesn't click.
+ * The delay time can also be changed while it runs (the plugin's tempo sync and TIME): prepare() with room for
+ * the longest time, then setDelaySamples(). The read point glides over to the new time in 20 ms so it doesn't
+ * click. Feedback and the two filters can change too (the plugin's Delay settings).
  */
 class SendDelay {
 public:
@@ -38,16 +39,25 @@ public:
         s_ = s;
         len_ = std::max(1, (int)std::lround(s.delaySeconds * sampleRate));
         cap_ = std::max(len_, (int)std::ceil(maxDelaySeconds * sampleRate));
-        buf_.assign((size_t)cap_, 0.0);
+        buf_.assign((size_t)cap_, 0.0f);
         fadeLen_ = std::max(1, (int)std::lround(0.02 * sampleRate));
-        const double pi = 3.141592653589793;
-        const double kl = std::tan(pi * std::min(s.lowpassHz, 0.49 * sampleRate) / sampleRate);
-        lpB_ = kl / (1.0 + kl); lpP_ = (1.0 - kl) / (1.0 + kl);
-        const double kh = std::tan(pi * s.highpassHz / sampleRate);
-        hpB_ = 1.0 / (1.0 + kh); hpP_ = (1.0 - kh) / (1.0 + kh);
+        sr_ = sampleRate;
+        setFilters(s.lowpassHz, s.highpassHz);
         reset();
     }
-    void reset() { std::fill(buf_.begin(), buf_.end(), 0.0); pos_ = 0; fadeLeft_ = 0; oldLen_ = len_; lpX_ = lpY_ = hpX_ = hpY_ = 0.0; }
+    /** The loop's two filters, while running (real-time safe). */
+    void setFilters(double lowpassHz, double highpassHz) {
+        s_.lowpassHz = lowpassHz; s_.highpassHz = highpassHz;
+        const double pi = 3.141592653589793;
+        const double kl = std::tan(pi * std::min(lowpassHz, 0.49 * sr_) / sr_);
+        lpB_ = kl / (1.0 + kl); lpP_ = (1.0 - kl) / (1.0 + kl);
+        const double kh = std::tan(pi * std::min(highpassHz, 0.49 * sr_) / sr_);
+        hpB_ = 1.0 / (1.0 + kh); hpP_ = (1.0 - kh) / (1.0 + kh);
+    }
+    /** The gain round the loop, while running. */
+    void setFeedback(double loopGain) { s_.feedback = loopGain; }
+    const Settings& getSettings() const { return s_; }
+    void reset() { std::fill(buf_.begin(), buf_.end(), 0.0f); pos_ = 0; fadeLeft_ = 0; oldLen_ = len_; lpX_ = lpY_ = hpX_ = hpY_ = 0.0; }
     int getDelaySamples() const { return len_; }
     int getMaxDelaySamples() const { return cap_; }
 
@@ -64,14 +74,14 @@ public:
         if (fadeLeft_ > 0) { const double a = (double)fadeLeft_-- / (double)fadeLen_; d = a * tap(oldLen_) + (1.0 - a) * d; }
         const double lp = lpB_ * (d + lpX_) + lpP_ * lpY_; lpX_ = d; lpY_ = lp;
         const double v = hpB_ * (lp - hpX_) + hpP_ * hpY_; hpX_ = lp; hpY_ = v;
-        buf_[(size_t)pos_] = in + s_.feedback * v;
+        buf_[(size_t)pos_] = (float)(in + s_.feedback * v);
         if (++pos_ == cap_) pos_ = 0;
         return v * s_.level;
     }
 private:
     Settings s_;
-    double lpB_ = 0, lpP_ = 0, hpB_ = 1, hpP_ = 0, lpX_ = 0, lpY_ = 0, hpX_ = 0, hpY_ = 0;
+    double sr_ = 44100.0, lpB_ = 0, lpP_ = 0, hpB_ = 1, hpP_ = 0, lpX_ = 0, lpY_ = 0, hpX_ = 0, hpY_ = 0;
     double tap(int delay) const { const int i = pos_ - delay; return buf_[(size_t)(i < 0 ? i + cap_ : i)]; }
     int len_ = 1, cap_ = 1, pos_ = 0, oldLen_ = 1, fadeLeft_ = 0, fadeLen_ = 1;
-    std::vector<double> buf_;
+    std::vector<float> buf_;                               // float: a long line (4 s) in half the memory
 };

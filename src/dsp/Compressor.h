@@ -55,12 +55,31 @@ public:
         sr_ = sampleRate; s_ = s; f_ = f; ch_ = channels;
         aRms_ = coef(f.rmsMs); aAtt_ = coef(s.attackMs * f.attackScale); aRel_ = coef(s.releaseMs * f.releaseScale);
         aLoud_ = coef(f.matchLevelMs); aMatch_ = coef(f.matchSmoothMs);
+        matchStartPow_ = std::pow(10.0, f.matchStartDb / 10.0); matchWindowPow_ = std::pow(10.0, -f.matchWindowDb / 10.0);
+        curvePow_ = 0.0; setThresholdDb(s.thresholdDb); setMakeupDb(s.makeupDb);
         reset();
     }
     void reset() { ms_ = 0; smooth_ = (f_.mode == 1) ? 1.0 : 0.0; loud_ = 0; loudInit_ = false; matchDb_ = 0; loudCount_ = 0; }
-    double getGainReductionDb() const { return grDb_; }
+    /** Gain reduction now (dB, positive). Computed when asked: the audio path itself only needs the linear gain. */
+    double getGainReductionDb() const { return f_.mode == 0 ? -smooth_ : -20.0 * std::log10(smooth_); }
+    /** The compression gain now, linear (<= 1; without make-up). Lower means more reduction, so the most reduction
+     *  over a stretch is getGainReductionDb() at the lowest of these. */
+    double getGainLinear() const { return f_.mode == 0 ? std::pow(10.0, smooth_ / 20.0) : smooth_; }
+    /** The detector's level now (RMS, dBFS): what the curve is read at. */
+    double getLevelDb() const { return 10.0 * std::log10(ms_ + 1e-30); }
     /** Move the threshold while running; the whole curve is defined relative to it. */
-    void setThresholdDb(double db) { s_.thresholdDb = db; }
+    void setThresholdDb(double db) {
+        if (db == s_.thresholdDb && curvePow_ > 0.0) return;
+        s_.thresholdDb = db;
+        curvePow_ = std::pow(10.0, (db + f_.curveStartDb) / 10.0);   // the mean square where the curve starts
+    }
+    /** Move the attack / release while running. */
+    void setTimes(double attackMs, double releaseMs) {
+        s_.attackMs = attackMs; s_.releaseMs = releaseMs;
+        aAtt_ = coef(attackMs * f_.attackScale); aRel_ = coef(releaseMs * f_.releaseScale);
+    }
+    /** Move the make-up gain while running (a plain gain after the compression). */
+    void setMakeupDb(double db) { s_.makeupDb = db; makeupLin_ = std::pow(10.0, db / 20.0); }
 
     /** Current gain-match correction in dB (0 when matching is off or at the reference threshold). */
     double getMatchDb() const { return matchDb_; }
@@ -74,32 +93,49 @@ public:
         double p = 0.0;
         for (int c = 0; c < ch_; ++c) p = std::max(p, io[c] * io[c]);  // side chain detection: Max
         ms_ += (p - ms_) * aRms_;
-        double gDb;
-        const double levelDb = 10.0 * std::log10(ms_ + 1e-30);
-        const double target = curve(levelDb);
-        if (f_.mode == 0) { smooth_ += (target - smooth_) * (target < smooth_ ? aAtt_ : aRel_); gDb = smooth_; }
-        else { const double t = std::pow(10.0, target / 20.0); smooth_ += (t - smooth_) * (t < smooth_ ? aAtt_ : aRel_); gDb = 20.0 * std::log10(smooth_); }
-        grDb_ = -gDb;
-        if (!std::isnan(s_.matchThresholdDb)) {
-            // follower: one-pole average of the detector's mean square, fed only while within the window of it
-            // Until it has seen matchLevelMs worth of signal it is a plain running mean (weight 1/count),
-            // so it settles on the take's level within the first phrase instead of creeping up from the
-            // first sound over several seconds (hosts reset plugins every time playback starts).
-            if (!loudInit_) { if (levelDb > f_.matchStartDb) { loud_ = ms_; loudInit_ = true; loudCount_ = 1; } }
-            else if (levelDb > 10.0 * std::log10(loud_) - f_.matchWindowDb) {
-                loud_ += (ms_ - loud_) * std::max(aLoud_, 1.0 / ++loudCount_);
-            }
-            const double L = 10.0 * std::log10(loud_ + 1e-30);
-            const double want = loudInit_ ? curveAt(L, s_.matchThresholdDb) - curveAt(L, s_.thresholdDb) : 0.0;
-            matchDb_ += (want - matchDb_) * aMatch_;
-        }
-        const double g = std::pow(10.0, (gDb + s_.makeupDb + matchDb_) / 20.0);
+        if (f_.mode == 0) { processFrameDb(io); return; }
+        // Linear gain smoothing (what GarageBand does). The same sums as written in the class comment, arranged
+        // so that the logs and powers are only taken when they can change the result: below the curve's start
+        // (and while the gain match has nothing to correct) a frame costs no transcendental function at all.
+        const double m = ms_ + 1e-30;
+        const double t = m > curvePow_ ? std::pow(10.0, curve(10.0 * std::log10(m)) / 20.0) : 1.0;
+        smooth_ += (t - smooth_) * (t < smooth_ ? aAtt_ : aRel_);
+        if (!std::isnan(s_.matchThresholdDb)) updateMatch(m);
+        const double g = smooth_ * makeupLin_ * (matchDb_ == 0.0 ? 1.0 : std::pow(10.0, matchDb_ / 20.0));
         for (int c = 0; c < ch_; ++c) io[c] *= g;
     }
 private:
+    /** The gain match's follower (see the class comment). Comparisons are made on the mean square rather than
+     *  in dB, which is the same test without the logs. */
+    void updateMatch(double m) {
+        // follower: one-pole average of the detector's mean square, fed only while within the window of it
+        // Until it has seen matchLevelMs worth of signal it is a plain running mean (weight 1/count),
+        // so it settles on the take's level within the first phrase instead of creeping up from the
+        // first sound over several seconds (hosts reset plugins every time playback starts).
+        if (!loudInit_) { if (m > matchStartPow_) { loud_ = ms_; loudInit_ = true; loudCount_ = 1; } }
+        else if (m > loud_ * matchWindowPow_) {
+            loud_ += (ms_ - loud_) * std::max(aLoud_, 1.0 / ++loudCount_);
+        }
+        double want = 0.0;
+        if (loudInit_ && s_.thresholdDb != s_.matchThresholdDb) {          // at the reference it is exactly 0
+            const double L = 10.0 * std::log10(loud_ + 1e-30);
+            want = curveAt(L, s_.matchThresholdDb) - curveAt(L, s_.thresholdDb);
+        }
+        matchDb_ += (want - matchDb_) * aMatch_;
+    }
+    /** Smoothing in dB (Fit::mode 0, not what GarageBand does; kept for the fitting tools). */
+    void processFrameDb(double* io) {
+        const double levelDb = 10.0 * std::log10(ms_ + 1e-30);
+        const double target = curve(levelDb);
+        smooth_ += (target - smooth_) * (target < smooth_ ? aAtt_ : aRel_);
+        if (!std::isnan(s_.matchThresholdDb)) updateMatch(ms_ + 1e-30);
+        const double g = std::pow(10.0, (smooth_ + s_.makeupDb + matchDb_) / 20.0);
+        for (int c = 0; c < ch_; ++c) io[c] *= g;
+    }
     double coef(double ms) const { return ms <= 0 ? 1.0 : 1.0 - std::exp(-1.0 / (ms * 1e-3 * sr_)); }
     Settings s_; Fit f_;
-    double sr_ = 44100, aRms_ = 1, aAtt_ = 1, aRel_ = 1, ms_ = 0, smooth_ = 0, grDb_ = 0;
+    double sr_ = 44100, aRms_ = 1, aAtt_ = 1, aRel_ = 1, ms_ = 0, smooth_ = 0;
+    double curvePow_ = 0, makeupLin_ = 1, matchStartPow_ = 0, matchWindowPow_ = 1;
     double aLoud_ = 1, aMatch_ = 1, loud_ = 0, matchDb_ = 0, loudCount_ = 0; bool loudInit_ = false;
     int ch_ = 2;
 };

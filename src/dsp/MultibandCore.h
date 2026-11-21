@@ -64,6 +64,10 @@ public:
 
     /** Gain reduction of one band in dB (positive), for metering. */
     double getGainReduction(int band) const { return bands_[band].getGainReduction(); }
+    double getGainLinear(int band) const { return bands_[band].getGainLinear(); }
+
+    /** One band's detector level (mean square of its last 256 samples), for metering. */
+    double getMeanSquare(int band) const { return bands_[band].getMeanSquare(); }
 
     /** Mono. */
     double processSample(double input) { double f[1] = {input}; processFrame(f, 1); return f[0]; }

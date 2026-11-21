@@ -27,14 +27,27 @@ public:
         double bw[3]   = {2.0, 2.0, 2.0};
         bool highIsCut = false; double highFreq = 10000.0, highGain = 0.0;
     };
-    void prepare(double sr, const Settings& s) {
-        shelfOrCut(sec_[0], sr, s.lowFreq, s.lowGain, true, s.lowIsCut);
-        for (int i = 0; i < 3; ++i) peak(sec_[1 + i], sr, s.freq[i], s.gain[i], s.bw[i]);
-        shelfOrCut(sec_[4], sr, s.highFreq, s.highGain, false, s.highIsCut);
-        reset();
+    void prepare(double sr, const Settings& s) { set(sr, s); reset(); }
+    /** New settings while running: the coefficients change, the filter state is kept (as the AU does). */
+    void set(double sr, const Settings& s) {
+        const double top = 0.495 * sr;                               // the AU's own top (21829.5 Hz at 44.1 kHz)
+        shelfOrCut(sec_[0], sr, std::min(s.lowFreq, top), s.lowGain, true, s.lowIsCut);
+        for (int i = 0; i < 3; ++i) peak(sec_[1 + i], sr, std::min(s.freq[i], top), s.gain[i], s.bw[i]);
+        shelfOrCut(sec_[4], sr, std::min(s.highFreq, top), s.highGain, false, s.highIsCut);
     }
     void reset() { for (auto& b : sec_) b.reset(); }
     double process(double x) { for (auto& b : sec_) x = b.process(x); return x; }
+    /** The response at f Hz, in dB (for drawing it). */
+    double magnitudeDb(double f, double sr) const {
+        const double w = 2 * dspmath::kPi * f / sr, c1 = std::cos(w), s1 = std::sin(w), c2 = std::cos(2 * w), s2 = std::sin(2 * w);
+        double db = 0.0;
+        for (const auto& q : sec_) {
+            const double nr = q.b0 + q.b1 * c1 + q.b2 * c2, ni = -(q.b1 * s1 + q.b2 * s2);
+            const double dr = 1.0 + q.a1 * c1 + q.a2 * c2, di = -(q.a1 * s1 + q.a2 * s2);
+            db += 10.0 * std::log10((nr * nr + ni * ni) / (dr * dr + di * di) + 1e-30);
+        }
+        return db;
+    }
 
     static void peak(Biquad& q, double sr, double f, double gDb, double bwOct) {
         const double A = std::pow(10.0, gDb / 40.0), w = 2 * dspmath::kPi * f / sr, s = std::sin(w), c = std::cos(w);
@@ -79,17 +92,25 @@ public:
                                          6.5, 0, 2.8, 0, 7.8, 0, 0, 0, 0, 0, 12.6, 0, 0, 6.5};
         return g;
     }
-    void prepare(double sr, const double* gainsDb) {
-        sec_.clear();
+    void prepare(double sr, const double* gainsDb) { set(sr, gainsDb); reset(); }
+    /** New gains while running (no allocation). A band at 0 dB is skipped (it would pass the signal unchanged);
+     *  one that comes back starts from silence, the others keep their state. */
+    void set(double sr, const double* gainsDb) {
+        n_ = 0;
         for (int i = 0; i < kBands; ++i) {
-            if (gainsDb[i] == 0.0 || frequencies()[i] >= 0.5 * sr) continue;
+            const bool on = gainsDb[i] != 0.0 && frequencies()[i] < 0.5 * sr;
+            if (!on) { active_[i] = false; continue; }
+            if (!active_[i]) sec_[i].reset();
+            active_[i] = true; idx_[n_++] = i;
             const double G = std::pow(10.0, gainsDb[i] / 20.0), w = 2 * dspmath::kPi * frequencies()[i] / sr, K = 4 * std::tan(std::sqrt(2.0) / 12 * w);
             const double d = K / (1 + G), n = K * G / (1 + G), c = std::cos(w);
-            Biquad q; q.set(1 + n, -2 * c, 1 - n, 1 + d, -2 * c, 1 - d); sec_.push_back(q);
+            sec_[i].set(1 + n, -2 * c, 1 - n, 1 + d, -2 * c, 1 - d);
         }
     }
     void reset() { for (auto& b : sec_) b.reset(); }
-    double process(double x) { for (auto& b : sec_) x = b.process(x); return x; }
+    double process(double x) { for (int k = 0; k < n_; ++k) x = sec_[idx_[k]].process(x); return x; }
 private:
-    std::vector<Biquad> sec_;
+    Biquad sec_[kBands];
+    bool active_[kBands] = {};
+    int idx_[kBands] = {}, n_ = 0;
 };

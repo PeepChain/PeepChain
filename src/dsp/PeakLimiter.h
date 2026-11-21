@@ -33,10 +33,16 @@ public:
     }
     void reset() {
         std::fill(delay_.begin(), delay_.end(), 0.0);
-        pos_ = 0; lg_ = 0.0; slope_ = 0.0; count_ = 0; overAge_ = n_ + 1;
+        pos_ = 0; g_ = 1.0; mul_ = 1.0; slope_ = 0.0; count_ = 0; overAge_ = n_ + 1;
     }
     int getLatency() const { return n_; }
-    double getGainReductionDb() const { return -lg_ * 8.685889638; }
+    /** Release and pre-gain can change while running (the attack can't: it is the look-ahead, i.e. the latency). */
+    void setRelease(double releaseSec) { relK_ = std::pow(0.5, 1.0 / (releaseSec * sr_)); }
+    void setPregainDb(double pregainDb) { pre_ = std::pow(10.0, pregainDb / 20.0); }
+    double getPregain() const { return pre_; }
+    double getGainReductionDb() const { return -20.0 * std::log10(g_); }
+    /** The gain now, linear (<= 1): the lowest over a stretch is the most reduction. */
+    double getGain() const { return g_; }
 
     /** io: one frame (ch_ samples), processed in place; output is delayed by getLatency(). */
     void processFrame(double* io) {
@@ -44,27 +50,27 @@ public:
         for (int c = 0; c < ch_; ++c) { io[c] *= pre_; a = std::max(a, std::fabs(io[c])); }
         // newest sample enters the look-ahead
         if (a > 1.0) overAge_ = 0; else if (overAge_ <= n_) ++overAge_;
-        const double need = std::log(std::max(a, 1e-30)) + lg_;      // ln(|x| * g)
-        if (need > 0.0) {
-            const double cand = need / rampLen_;
-            if (cand > slope_ || count_ == 0) { slope_ = cand; count_ = n_; }
+        // The gain is kept linear; a ramp's constant dB step is a constant factor. Only starting a ramp takes a
+        // log and an exp, so a frame that changes nothing (or releases) costs none.
+        const double ag = a * g_;
+        if (ag > 1.0) {                                                // ln(|x| * g) > 0
+            const double cand = std::log(ag) / rampLen_;
+            if (cand > slope_ || count_ == 0) { slope_ = cand; count_ = n_; mul_ = std::exp(-cand); }
         }
         if (count_ > 0) {
-            lg_ -= slope_;
+            g_ *= mul_;
             if (--count_ == 0) slope_ = 0.0;
         } else if (overAge_ >= n_) {                                   // no over-ceiling sample left in the window
-            const double g = 1.0 - (1.0 - std::exp(lg_)) * relK_;
-            lg_ = std::log(g);
+            g_ = 1.0 - (1.0 - g_) * relK_;
         }
-        const double g = std::exp(lg_);
         for (int c = 0; c < ch_; ++c) {
             double& d = delay_[(size_t)pos_ * ch_ + c];
-            const double out = d * g; d = io[c]; io[c] = out;
+            const double out = d * g_; d = io[c]; io[c] = out;
         }
         if (++pos_ == n_) pos_ = 0;
     }
 private:
-    double sr_ = 44100, pre_ = 1, relK_ = 0, rampLen_ = 78, lg_ = 0, slope_ = 0;
+    double sr_ = 44100, pre_ = 1, relK_ = 0, rampLen_ = 78, g_ = 1, mul_ = 1, slope_ = 0;
     int ch_ = 2, n_ = 88, pos_ = 0, count_ = 0, overAge_ = 0;
     std::vector<double> delay_;
 };
