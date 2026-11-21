@@ -33,6 +33,7 @@ public:
     static juce::String repo() { return PEEPCHAIN_GITHUB_REPO; }
     static bool isConfigured() { return repo().contains("/"); }
     static juce::URL releasesPage() { return juce::URL("https://github.com/" + repo() + "/releases/latest"); }
+    static juce::URL repoPage() { return juce::URL("https://github.com/" + repo()); }
 
     State getState() const { return state.load(); }
     /** The newer version's tag, once getState() is available. */

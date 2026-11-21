@@ -6,6 +6,8 @@
 
 const char* const PeepChainProcessor::stageParamIds[kStages] = {"gateOn", "compOn", "filterOn", "eqOn", "multiOn", "limitOn"};
 static const char* const kOrderProperty = "order";
+static const juce::Identifier kSlotProperty("abSlot"), kOtherSlotType("OtherSlot"), kSoundType("Sound"), kStepType("Step");
+static constexpr size_t kMaxUndoSteps = 100;
 
 uint32_t PeepChainProcessor::packOrder(const Order& o) {
     uint32_t v = 0;
@@ -31,12 +33,20 @@ PeepChainProcessor::PeepChainProcessor()
     delayLevel = apvts.getRawParameterValue("delayLevel");
     reverbLevel = apvts.getRawParameterValue("reverbLevel");
     autoGainOn = apvts.getRawParameterValue("autoGain");
+    delaySync = apvts.getRawParameterValue("delaySync");
+    for (auto* prm : getParameters()) prm->addListener(this);
+    committed = makeStep();
    #if PEEPCHAIN_HAS_REVERB
     // The reverb is its measured impulse response, used as it is: no trimming,
     // no level normalisation. JUCE resamples it when the host is not at 44.1 kHz.
     reverb.loadImpulseResponse(BinaryData::reverb_ir_wav, (size_t)BinaryData::reverb_ir_wavSize, juce::dsp::Convolution::Stereo::yes,
                                juce::dsp::Convolution::Trim::no, 0, juce::dsp::Convolution::Normalise::no);
    #endif
+}
+
+PeepChainProcessor::~PeepChainProcessor() {
+    cancelPendingUpdate();
+    for (auto* prm : getParameters()) prm->removeListener(this);
 }
 
 bool PeepChainProcessor::hasReverb() {
@@ -71,6 +81,8 @@ juce::AudioProcessorValueTreeState::ParameterLayout PeepChainProcessor::createLa
     layout.add(std::make_unique<P>(juce::ParameterID{"reverbLevel", 3}, "Reverb", juce::NormalisableRange<float>(kSendOffDb, 6.f, 0.1f, 2.5f), kReverbLevelDefault, sendText));
     // Loudness match at the very end (version hint 4). Off by default: the plugin opens at Peep's real level.
     layout.add(std::make_unique<juce::AudioParameterBool>(juce::ParameterID{"autoGain", 4}, "Auto Gain", false));
+    // Echo follows the host's tempo (version hint 5). Off by default: Peep's echo is always 500 ms.
+    layout.add(std::make_unique<juce::AudioParameterBool>(juce::ParameterID{"delaySync", 5}, "Delay Sync", false));
     return layout;
 }
 
@@ -105,7 +117,9 @@ void PeepChainProcessor::prepareToPlay(double sampleRate, int samplesPerBlock) {
     // Hosts may hand over more than they promised; processBlock then works in pieces of this size, so the
     // audio thread never allocates.
     maxBlock = juce::jlimit(64, 8192, samplesPerBlock);
-    delay.prepare(sampleRate, SendDelay::Settings());
+    sampleRateNow = sampleRate;
+    delay.prepare(sampleRate, SendDelay::Settings(), kMaxDelaySeconds);
+    delay.setDelaySamples(delaySamplesNow()); delay.reset();
     reverb.prepare({sampleRate, (juce::uint32)maxBlock, 2}); reverb.reset(); reverbIdle = true;
     dryBuf.setSize(2, maxBlock); delayBuf.setSize(2, maxBlock); reverbBuf.setSize(2, maxBlock);
     inPowerBuf.setSize(1, maxBlock); autoGain.prepare(sampleRate);
@@ -150,6 +164,7 @@ void PeepChainProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mi
     delayGain.setTargetValue(sendGain(delayLevel->load(), kDelayLevelDefault));
     reverbGain.setTargetValue(hasReverb() ? sendGain(reverbLevel->load(), kReverbLevelDefault) : 0.0f);
     applyControls();
+    delay.setDelaySamples(delaySamplesNow());
 
     float* l = buffer.getWritePointer(0);
     float* r = buffer.getNumChannels() > 1 ? buffer.getWritePointer(1) : nullptr;
@@ -238,6 +253,18 @@ void PeepChainProcessor::processBlockBypassed(juce::AudioBuffer<float>& buffer, 
     meters.blocks.fetch_add(1, std::memory_order_relaxed);
 }
 
+int PeepChainProcessor::delaySamplesNow() {
+    double seconds = SendDelay::Settings().delaySeconds;                // Peep's: a quarter note at 120 bpm
+    if (delaySync->load() > 0.5f)
+        if (auto* head = getPlayHead())
+            if (const auto pos = head->getPosition())
+                if (const auto bpm = pos->getBpm(); bpm.hasValue() && *bpm > 0.0)
+                    seconds = 60.0 / juce::jlimit(30.0, 300.0, *bpm);  // a quarter note at the song's tempo
+    const int n = juce::jlimit(1, (int)std::ceil(kMaxDelaySeconds * sampleRateNow), (int)std::lround(seconds * sampleRateNow));
+    delayMs = (float)(1000.0 * n / sampleRateNow);
+    return n;
+}
+
 //==============================================================================
 PeepChainProcessor::Order PeepChainProcessor::getOrder() const { return unpackOrder(order.load()); }
 
@@ -245,23 +272,26 @@ void PeepChainProcessor::setOrder(const Order& o) {
     if (!PeepChain::isValidOrder(o.data()) || packOrder(o) == order.load()) return;
     order.store(packOrder(o));
     updateHostDisplay(ChangeDetails().withNonParameterStateChanged(true));     // marks the session as changed
+    if (suspendCommits == 0 && juce::MessageManager::existsAndIsCurrentThread()) commitUndoStep();
 }
 
 bool PeepChainProcessor::isPeepPreset() const {
     if (order.load() != packOrder({0, 1, 2, 3, 4, 5})) return false;
     for (int i = 0; i < kStages; ++i) if (!isStageOn(i)) return false;
     return std::abs(gateThreshold->load() - kGateThresholdDefault) < 0.05f && std::abs(compThreshold->load() - kCompThresholdDefault) < 0.05f
-        && std::abs(delayLevel->load() - kDelayLevelDefault) < 0.05f && std::abs(reverbLevel->load() - kReverbLevelDefault) < 0.05f;
+        && std::abs(delayLevel->load() - kDelayLevelDefault) < 0.05f && std::abs(reverbLevel->load() - kReverbLevelDefault) < 0.05f
+        && delaySync->load() < 0.5f;
 }
 
 void PeepChainProcessor::resetToPeep() {
+    CommitGroup step(*this);
     auto set = [this](const char* id) {
         if (auto* p = apvts.getParameter(id)) {
             if (std::abs(p->getValue() - p->getDefaultValue()) < 1e-6f) return;
             p->beginChangeGesture(); p->setValueNotifyingHost(p->getDefaultValue()); p->endChangeGesture();
         }
     };
-    set("gateThresh"); set("compThresh"); set("delayLevel"); set("reverbLevel");
+    set("gateThresh"); set("compThresh"); set("delayLevel"); set("reverbLevel"); set("delaySync");
     for (auto* id : stageParamIds) set(id);
     setOrder({0, 1, 2, 3, 4, 5});
 }
@@ -271,6 +301,11 @@ void PeepChainProcessor::getStateInformation(juce::MemoryBlock& dest) {
     juce::StringArray parts;
     for (int st : getOrder()) parts.add(juce::String(st));
     state.setProperty(kOrderProperty, parts.joinIntoString(","), nullptr);
+    {
+        const juce::ScopedLock l(slotLock);
+        state.setProperty(kSlotProperty, activeSlot, nullptr);
+        if (otherSlot.isValid()) { juce::ValueTree o(kOtherSlotType); o.addChild(otherSlot.createCopy(), -1, nullptr); state.addChild(o, -1, nullptr); }
+    }
     if (auto xml = state.createXml()) copyXmlToBinary(*xml, dest);
 }
 
@@ -286,7 +321,125 @@ void PeepChainProcessor::setStateInformation(const void* data, int size) {
         if (PeepChain::isValidOrder(read.data())) o = read;
     }
     order.store(packOrder(o));
+    {
+        const juce::ScopedLock l(slotLock);
+        activeSlot = (int)state.getProperty(kSlotProperty, 0) == 1 ? 1 : 0;
+        const auto other = state.getChildWithName(kOtherSlotType);
+        otherSlot = other.isValid() && other.getChild(0).hasType(kSoundType) ? other.getChild(0).createCopy() : juce::ValueTree();
+        if (other.isValid()) state.removeChild(other, nullptr);
+    }
+    state.removeProperty(kSlotProperty, nullptr);
     apvts.replaceState(state);
+    // A loaded session starts a fresh undo history.
+    historyResetPending = true;
+    if (juce::MessageManager::existsAndIsCurrentThread()) handleAsyncUpdate(); else triggerAsyncUpdate();
+}
+
+//==============================================================================
+juce::ValueTree PeepChainProcessor::soundState() const {
+    juce::ValueTree t(kSoundType);
+    for (auto* prm : getParameters())
+        if (auto* wp = dynamic_cast<juce::AudioProcessorParameterWithID*>(prm)) t.setProperty(wp->paramID, prm->getValue(), nullptr);
+    juce::StringArray parts;
+    for (int st : getOrder()) parts.add(juce::String(st));
+    t.setProperty(kOrderProperty, parts.joinIntoString(","), nullptr);
+    return t;
+}
+
+void PeepChainProcessor::applySound(const juce::ValueTree& t) {
+    CommitGroup step(*this);
+    for (auto* prm : getParameters())
+        if (auto* wp = dynamic_cast<juce::AudioProcessorParameterWithID*>(prm); wp != nullptr && t.hasProperty(wp->paramID)) {
+            const float v = (float)t.getProperty(wp->paramID);
+            if (std::abs(prm->getValue() - v) < 1e-7f) continue;
+            prm->beginChangeGesture(); prm->setValueNotifyingHost(v); prm->endChangeGesture();
+        }
+    const auto parts = juce::StringArray::fromTokens(t.getProperty(kOrderProperty).toString(), ",", "");
+    if (parts.size() == kStages) {
+        Order o;
+        for (int i = 0; i < kStages; ++i) o[(size_t)i] = parts[i].getIntValue();
+        setOrder(o);
+    }
+}
+
+juce::ValueTree PeepChainProcessor::makeStep() const {
+    juce::ValueTree step(kStepType);
+    step.addChild(soundState(), -1, nullptr);
+    const juce::ScopedLock l(slotLock);
+    step.setProperty(kSlotProperty, activeSlot, nullptr);
+    if (otherSlot.isValid()) { juce::ValueTree o(kOtherSlotType); o.addChild(otherSlot.createCopy(), -1, nullptr); step.addChild(o, -1, nullptr); }
+    return step;
+}
+
+void PeepChainProcessor::restoreStep(const juce::ValueTree& step) {
+    ++suspendCommits;
+    {
+        const juce::ScopedLock l(slotLock);
+        activeSlot = (int)step.getProperty(kSlotProperty, 0);
+        const auto other = step.getChildWithName(kOtherSlotType);
+        otherSlot = other.isValid() ? other.getChild(0).createCopy() : juce::ValueTree();
+    }
+    applySound(step.getChildWithName(kSoundType));
+    --suspendCommits;
+    committed = makeStep();
+}
+
+void PeepChainProcessor::commitUndoStep() {
+    JUCE_ASSERT_MESSAGE_THREAD
+    if (suspendCommits > 0) return;
+    auto now = makeStep();
+    if (now.isEquivalentTo(committed)) return;
+    undoStack.push_back(committed);
+    if (undoStack.size() > kMaxUndoSteps) undoStack.erase(undoStack.begin());
+    redoStack.clear();
+    committed = now;
+}
+
+void PeepChainProcessor::undo() {
+    commitUndoStep();                                          // anything not yet recorded (e.g. host automation) first
+    if (undoStack.empty()) return;
+    redoStack.push_back(committed);
+    const auto step = undoStack.back(); undoStack.pop_back();
+    restoreStep(step);
+}
+
+void PeepChainProcessor::redo() {
+    if (redoStack.empty()) return;
+    undoStack.push_back(committed);
+    const auto step = redoStack.back(); redoStack.pop_back();
+    restoreStep(step);
+}
+
+void PeepChainProcessor::parameterGestureChanged(int, bool starting) {
+    if (starting || suspendCommits > 0) return;
+    if (juce::MessageManager::existsAndIsCurrentThread()) commitUndoStep();
+    else { commitPending = true; triggerAsyncUpdate(); }
+}
+
+void PeepChainProcessor::handleAsyncUpdate() {
+    if (historyResetPending.exchange(false)) { undoStack.clear(); redoStack.clear(); committed = makeStep(); commitPending = false; }
+    if (commitPending.exchange(false)) commitUndoStep();
+}
+
+void PeepChainProcessor::selectSlot(int slot) {
+    slot = slot == 1 ? 1 : 0;
+    if (slot == getActiveSlot()) return;
+    CommitGroup step(*this);
+    const auto live = soundState();
+    juce::ValueTree load;
+    {
+        const juce::ScopedLock l(slotLock);
+        load = otherSlot.isValid() ? otherSlot : live.createCopy();      // first visit: start from a copy
+        otherSlot = live; activeSlot = slot;
+    }
+    applySound(load);
+}
+
+void PeepChainProcessor::copyToOtherSlot() {
+    CommitGroup step(*this);
+    const auto live = soundState();
+    const juce::ScopedLock l(slotLock);
+    otherSlot = live;
 }
 
 juce::AudioProcessorEditor* PeepChainProcessor::createEditor() { return new PeepChainEditor(*this); }

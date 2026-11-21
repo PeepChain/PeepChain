@@ -19,12 +19,18 @@
  *  - how much Delay and Reverb is added,
  *  - Auto Gain (off by default): the output is matched in loudness to the input, so turning the plugin on
  *    and off compares the sound rather than the level.
+ *  - Delay sync (off by default): the echo follows the song's tempo (a quarter note) instead of Peep's fixed
+ *    500 ms, which is a quarter note at GarageBand's default 120 bpm.
+ *
+ * Every change made in the editor can be undone and redone, and there are two settings slots (A and B) to
+ * compare. Both live here rather than in the editor, so closing the window loses neither.
  *
  * Delay and Reverb are the two sends on his vocal track (GarageBand's master Echo and Reverb): the finished
  * vocal is fed to both side by side and their output is added to it. The level knobs default to his send
  * amounts and go down to "off".
  */
-class PeepChainProcessor : public juce::AudioProcessor {
+class PeepChainProcessor : public juce::AudioProcessor,
+                           private juce::AudioProcessorParameter::Listener, private juce::AsyncUpdater {
 public:
     static constexpr int kStages = PeepChain::kStages;
     using Order = std::array<int, kStages>;            // order[slot] = stage
@@ -36,6 +42,7 @@ public:
     static const char* const stageParamIds[kStages];   // on/off parameter of each stage
 
     PeepChainProcessor();
+    ~PeepChainProcessor() override;
 
     void prepareToPlay(double sampleRate, int samplesPerBlock) override;
     void releaseResources() override {}
@@ -64,8 +71,28 @@ public:
     bool isStageOn(int stage) const { return stageOn[(size_t)stage]->load() > 0.5f; }
     /** True when everything that shapes the sound is exactly as in Peep's preset (levels aside). */
     bool isPeepPreset() const;
-    /** Back to Peep's preset: his order, all six effects on, his two thresholds and send amounts. Leaves input / output alone. */
+    /** Back to Peep's preset: his order, all six effects on, his two thresholds and send amounts, delay sync off.
+        Leaves input / output and Auto Gain alone. One undo step. */
     void resetToPeep();
+
+    // Undo / redo. A step is recorded whenever a change made in the editor is finished (a knob let go, a
+    // piece clicked or dropped, Reset, an A/B switch...). Message thread only.
+    bool canUndo() const { return !undoStack.empty(); }
+    bool canRedo() const { return !redoStack.empty(); }
+    void undo();
+    void redo();
+    /** Records a step if anything changed since the last one (called by the processor itself after each change). */
+    void commitUndoStep();
+
+    // A/B: two sets of settings. The live settings are the active slot; the other is kept here.
+    int getActiveSlot() const { const juce::ScopedLock l(slotLock); return activeSlot; }
+    /** Puts the live settings away in the active slot and loads the other (a copy of the live ones the first time). */
+    void selectSlot(int slot);
+    /** Copies the live settings over the other slot. */
+    void copyToOtherSlot();
+
+    /** The echo's current delay time, ms (500 unless synced to the host's tempo). */
+    float getDelayMs() const { return delayMs.load(); }
 
     juce::AudioProcessorValueTreeState apvts;
 
@@ -99,6 +126,11 @@ private:
     AutoGain autoGain;
     juce::AudioBuffer<double> inPowerBuf;              // K-weighted input power per sample, for Auto Gain
     static float sendGain(float knobDb, float unityAtDb);
+    static constexpr double kMaxDelaySeconds = 2.0;    // a quarter note at 30 bpm
+    int delaySamplesNow();                             // from the host's tempo when synced (audio thread)
+    std::atomic<float>* delaySync = nullptr;
+    std::atomic<float> delayMs{500.0f};
+    double sampleRateNow = 44100.0;
     SendDelay delay;
     juce::dsp::Convolution reverb{juce::dsp::Convolution::NonUniform{1024}};   // zero latency
     juce::AudioBuffer<double> dryBuf; juce::AudioBuffer<float> delayBuf, reverbBuf;
@@ -111,5 +143,26 @@ private:
     // The input delayed by the reported latency, kept up to date all the time so that bypass is seamless.
     juce::AudioBuffer<float> bypassDelay; int bypassPos = 0;
     bool wasBypassed = false;
+
+    // undo / A-B
+    juce::ValueTree soundState() const;               // every parameter and the order
+    void applySound(const juce::ValueTree&);
+    juce::ValueTree makeStep() const;                  // the sound plus the A/B slots
+    void restoreStep(const juce::ValueTree&);
+    void parameterValueChanged(int, float) override {}
+    void parameterGestureChanged(int, bool starting) override;
+    void handleAsyncUpdate() override;
+    std::vector<juce::ValueTree> undoStack, redoStack;
+    juce::ValueTree committed;
+    int suspendCommits = 0;
+    std::atomic<bool> commitPending{false}, historyResetPending{false};
+    struct CommitGroup {                               // several parameter changes that are one step
+        explicit CommitGroup(PeepChainProcessor& p) : proc(p) { ++proc.suspendCommits; }
+        ~CommitGroup() { if (--proc.suspendCommits == 0) proc.commitUndoStep(); }
+        PeepChainProcessor& proc;
+    };
+    juce::CriticalSection slotLock;                    // getStateInformation may come from any thread
+    int activeSlot = 0;
+    juce::ValueTree otherSlot;                         // the inactive slot's sound (invalid until first used)
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PeepChainProcessor)
 };

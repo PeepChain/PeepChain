@@ -1,13 +1,13 @@
 #include "PluginEditor.h"
 #include "BinaryData.h"
 
-using Pal = PeepChainEditor::Palette;
+using Pal = PeepChainView::Palette;
 using RectF = juce::Rectangle<float>;
 using PointF = juce::Point<float>;
 static constexpr float kPi = juce::MathConstants<float>::pi;
 
 namespace {
-const float kW = 860.0f, kH = 598.0f;
+const float kW = (float)PeepChainView::kWidth, kH = (float)PeepChainView::kHeight;
 const float kBarX = 28.0f, kBarY = 160.0f, kBarH = 142.0f, kSeam = 2.0f;
 const float kKnobSize = 112.0f, kKnobY = 352.0f;
 const int kKnobs = 6;
@@ -23,17 +23,17 @@ struct EmbeddedFonts {
     juce::Typeface::Ptr title = juce::Typeface::createSystemTypefaceFor(BinaryData::AlmendraRegular_ttf, (size_t)BinaryData::AlmendraRegular_ttfSize);
     juce::Typeface::Ptr label = juce::Typeface::createSystemTypefaceFor(BinaryData::BarlowCondensedSemiBold_ttf, (size_t)BinaryData::BarlowCondensedSemiBold_ttfSize);
 };
-juce::Font PeepChainEditor::titleFont(float h) {                     // Almendra in place of Luminari
+juce::Font PeepChainView::titleFont(float h) {                     // Almendra in place of Luminari
     juce::SharedResourcePointer<EmbeddedFonts> f;
     return juce::Font(juce::FontOptions(f->title).withAscentOverride(0.8547f).withDescentOverride(0.3256f).withHeight(h));
 }
-juce::Font PeepChainEditor::plainLabelFont(float h) {                // Barlow Condensed SemiBold in place of DIN Condensed Bold
+juce::Font PeepChainView::plainLabelFont(float h) {                // Barlow Condensed SemiBold in place of DIN Condensed Bold
     juce::SharedResourcePointer<EmbeddedFonts> f;
     return juce::Font(juce::FontOptions(f->label).withAscentOverride(0.7467f).withDescentOverride(0.3675f).withHeight(h));
 }
-juce::Font PeepChainEditor::labelFont(float h) { return plainLabelFont(h).withExtraKerningFactor(0.12f); }
+juce::Font PeepChainView::labelFont(float h) { return plainLabelFont(h).withExtraKerningFactor(0.12f); }
 
-juce::Path PeepChainEditor::heart(RectF r) {
+juce::Path PeepChainView::heart(RectF r) {
     const float x = r.getX(), y = r.getY(), w = r.getWidth(), h = r.getHeight();
     juce::Path p;
     p.startNewSubPath(x + w * 0.5f, y + h * 0.26f);
@@ -105,7 +105,7 @@ static void miniBar(juce::Graphics& g, PointF c, float len, float angle, float a
     }
     if (lettered && len >= 40.0f) {
         const char* letters[4] = {"X", "AN", "A", "X"};
-        const auto f = PeepChainEditor::plainLabelFont(th * 0.62f);
+        const auto f = PeepChainView::plainLabelFont(th * 0.62f);
         for (int i = 0; i < 4; ++i) stampText(g, letters[i], {b.getX() + len * (float)i / 4.0f, b.getY() + th * 0.08f, len / 4.0f, th}, f, juce::Justification::centred);
     }
     if (alpha < 1.0f) g.endTransparencyLayer();
@@ -142,7 +142,7 @@ static juce::Path crackPath(RectF r) {
 }
 
 static void brokenHeart(juce::Graphics& g, RectF r, juce::Colour fill, juce::Colour crack) {
-    g.setColour(fill); g.fillPath(PeepChainEditor::heart(r));
+    g.setColour(fill); g.fillPath(PeepChainView::heart(r));
     g.setColour(crack); g.strokePath(crackPath(r), juce::PathStrokeType(juce::jmax(1.5f, r.getWidth() * 0.07f), juce::PathStrokeType::mitered));
 }
 
@@ -201,18 +201,18 @@ void PeepLookAndFeel::drawRotarySlider(juce::Graphics& g, int x, int y, int w, i
     const PointF hp(c.x + std::sin(ang) * (br - 11.0f), c.y - std::cos(ang) * (br - 11.0f));
     const auto hr = RectF(13.0f, 12.0f).withCentre(hp);
     const auto turn = juce::AffineTransform::rotation(ang, hp.x, hp.y);
-    g.setColour(juce::Colours::white.withAlpha(0.9f)); g.fillPath(PeepChainEditor::heart(hr.translated(0.0f, 1.0f)), turn);
-    g.setColour(Pal::pink().darker(0.1f)); g.fillPath(PeepChainEditor::heart(hr), turn);
+    g.setColour(juce::Colours::white.withAlpha(0.9f)); g.fillPath(PeepChainView::heart(hr.translated(0.0f, 1.0f)), turn);
+    g.setColour(Pal::pink().darker(0.1f)); g.fillPath(PeepChainView::heart(hr), turn);
 
     const double v = s.getValue();
     const bool off = s.getProperties()["offAtMinimum"] && v <= s.getMinimum() + 0.05;
     stampText(g, off ? juce::String("OFF") : (v > 0.05 ? "+" : "") + juce::String(v, 1), RectF(br * 2, br).withCentre(c.translated(0.0f, 3.0f)),
-              PeepChainEditor::labelFont(juce::jmax(16.0f, br * 0.52f)).withExtraKerningFactor(0.04f), juce::Justification::centred);
+              PeepChainView::labelFont(juce::jmax(16.0f, br * 0.52f)).withExtraKerningFactor(0.04f), juce::Justification::centred);
 }
 
 //==============================================================================
-PeepChainEditor::PeepChainEditor(PeepChainProcessor& p)
-    : AudioProcessorEditor(&p), proc(p),
+PeepChainView::PeepChainView(PeepChainProcessor& p)
+    : proc(p),
       inputAtt(p.apvts, "input", input), gateAtt(p.apvts, "gateThresh", gateThresh), compAtt(p.apvts, "compThresh", compThresh),
       delayAtt(p.apvts, "delayLevel", delayLevel), reverbAtt(p.apvts, "reverbLevel", reverbLevel), outputAtt(p.apvts, "output", output) {
     setLookAndFeel(&lnf);
@@ -226,16 +226,16 @@ PeepChainEditor::PeepChainEditor(PeepChainProcessor& p)
     input.setTooltip("How hard the vocal hits the chain. Aim the IN meter's peaks at the marked zone.");
     gateThresh.setTooltip("Noise Gate threshold. Anything quieter is cut. Peep's setting: -46 dB.");
     compThresh.setTooltip("Compressor threshold. Lower squashes more. Peep's setting: -26 dB.");
-    delayLevel.setTooltip("How much echo is added (a 500 ms repeat). Peep's send: -16.5. All the way down is off.");
+    delayLevel.setTooltip("How much echo is added (a 500 ms repeat, or a quarter note of the song with SYNC on). Peep's send: -16.5. All the way down is off.");
     reverbLevel.setTooltip("How much reverb is added. Peep's send: -6.0. All the way down is off.");
     for (auto* s : {&delayLevel, &reverbLevel}) s->getProperties().set("offAtMinimum", true);
     output.setTooltip("Level after everything");
     setSize((int)kW, (int)kH);
     startTimerHz(30);
 }
-PeepChainEditor::~PeepChainEditor() { stopTimer(); setLookAndFeel(nullptr); }
+PeepChainView::~PeepChainView() { stopTimer(); setLookAndFeel(nullptr); }
 
-void PeepChainEditor::resized() {
+void PeepChainView::resized() {
     juce::Slider* knobs[kKnobs] = {&input, &gateThresh, &compThresh, &delayLevel, &reverbLevel, &output};
     for (int i = 0; i < kKnobs; ++i) {
         const float cx = (float)getWidth() * (2.0f * (float)i + 1.0f) / (2.0f * (float)kKnobs);
@@ -244,7 +244,7 @@ void PeepChainEditor::resized() {
     backdrop = {}; chainLayer = {};
 }
 
-void PeepChainEditor::updateMeters() {
+void PeepChainView::updateMeters() {
     auto fall = [](float& state, float target, float rate) { state = target > state ? target : juce::jmax(target, state - rate); };
     auto& m = proc.meters;
     // When the host stops sending audio (transport stopped, track frozen) the last values would stay up for
@@ -264,30 +264,57 @@ void PeepChainEditor::updateMeters() {
 }
 
 //==============================================================================
-RectF PeepChainEditor::slotBounds(int slot) const {
+RectF PeepChainView::slotBounds(int slot) const {
     const float w = ((float)getWidth() - 2.0f * kBarX) / 6.0f;
     return {kBarX + (float)slot * w, kBarY, w, kBarH};
 }
-RectF PeepChainEditor::resetBounds() const { return {(float)getWidth() - kBarX - 172.0f, 122.0f, 172.0f, 28.0f}; }
-RectF PeepChainEditor::autoGainBounds() const { return {resetBounds().getX() - 14.0f - 156.0f, 122.0f, 156.0f, 28.0f}; }
-RectF PeepChainEditor::updateBounds() const { return {150.0f, 91.0f, 250.0f, 16.0f}; }
+RectF PeepChainView::resetBounds() const { return {(float)getWidth() - kBarX - 172.0f, 122.0f, 172.0f, 28.0f}; }
+RectF PeepChainView::autoGainBounds() const { return {resetBounds().getX() - 14.0f - 156.0f, 122.0f, 156.0f, 28.0f}; }
+static constexpr float kVersionX = 100.0f, kVersionY = 91.0f;
+static juce::String versionText() { return "V" + UpdateChecker::currentVersion(); }
+RectF PeepChainView::githubBounds() const {
+    if (!UpdateChecker::isConfigured()) return {kVersionX + juce::GlyphArrangement::getStringWidth(labelFont(12.0f), versionText()), kVersionY, 0.0f, 16.0f};
+    const float x = kVersionX + juce::GlyphArrangement::getStringWidth(labelFont(12.0f), versionText()) + 6.0f;
+    return {x, kVersionY, 16.0f + 4.0f + juce::GlyphArrangement::getStringWidth(labelFont(12.0f), "GITHUB"), 16.0f};
+}
+RectF PeepChainView::updateBounds() const { return {githubBounds().getRight() + 12.0f, kVersionY, 250.0f, 16.0f}; }
 
-juce::String PeepChainEditor::getTooltip() {
+juce::String PeepChainView::getTooltip() {
     if (autoGainBounds().contains(lastMouse))
         return "Auto Gain: turns the output down (or up) to the loudness of what comes in, so switching the plugin on "
                "and off compares the sound, not the volume. The number is the gain it applies. Off by default.";
     if (updateBounds().contains(lastMouse) && updates->getState() == UpdateChecker::State::available)
         return "Open the download page for " + updates->getLatestVersion();
+    if (githubBounds().contains(lastMouse)) return "Open PeepChain on GitHub";
+    for (int c = 0; c < kNumControls; ++c) {
+        if (!controlBounds(c).contains(lastMouse)) continue;
+        const juce::String here = proc.getActiveSlot() == 0 ? "A" : "B", there = proc.getActiveSlot() == 0 ? "B" : "A";
+        switch (c) {
+            case kUndo: return "Undo the last change";
+            case kRedo: return "Redo what was undone";
+            case kSlotA: case kSlotB:
+                return "Two sets of settings to compare. Click " + juce::String(c == kSlotA ? "A" : "B") + " to switch to it; "
+                       "what you leave stays in its slot. The first visit to B starts as a copy of A.";
+            case kCopy: return "Copy these settings (" + here + ") over " + there;
+            case kSize: return "Window size";
+            case kSync: {
+                const bool on = proc.apvts.getRawParameterValue("delaySync")->load() > 0.5f;
+                return on ? "Echo follows the song's tempo: a quarter note, now " + juce::String(juce::roundToInt(proc.getDelayMs())) + " ms. Click for Peep's fixed 500 ms."
+                          : "Echo at Peep's fixed 500 ms (a quarter note at 120 bpm). Click to follow the song's tempo instead.";
+            }
+            default: break;
+        }
+    }
     if (resetBounds().contains(lastMouse)) return "Put the order, switches, thresholds and sends back to Peep's settings";
     return {};
 }
 
-int PeepChainEditor::slotAt(PointF p) const {
+int PeepChainView::slotAt(PointF p) const {
     for (int i = 0; i < kStages; ++i) if (slotBounds(i).contains(p)) return i;
     return -1;
 }
 
-PeepChainProcessor::Order PeepChainEditor::displayOrder() const {
+PeepChainProcessor::Order PeepChainView::displayOrder() const {
     auto o = proc.getOrder();
     if (!dragging || pressedSlot < 0 || dragToSlot < 0 || dragToSlot == pressedSlot) return o;
     const int stage = o[(size_t)pressedSlot];
@@ -298,20 +325,22 @@ PeepChainProcessor::Order PeepChainEditor::displayOrder() const {
     return o;
 }
 
-void PeepChainEditor::toggleStage(int stage) {
+void PeepChainView::toggleStage(int stage) {
     if (auto* p = proc.apvts.getParameter(PeepChainProcessor::stageParamIds[stage])) {
         p->beginChangeGesture(); p->setValueNotifyingHost(p->getValue() > 0.5f ? 0.0f : 1.0f); p->endChangeGesture();
     }
 }
 
-void PeepChainEditor::mouseDown(const juce::MouseEvent& e) {
+void PeepChainView::mouseDown(const juce::MouseEvent& e) {
     pressedSlot = slotAt(e.position); dragToSlot = pressedSlot; dragging = false; dragDx = 0;
     pressedReset = pressedSlot < 0 && resetBounds().contains(e.position);
     pressedAutoGain = pressedSlot < 0 && autoGainBounds().contains(e.position);
     pressedUpdate = pressedSlot < 0 && updateBounds().contains(e.position) && updates->getState() == UpdateChecker::State::available;
+    pressedGithub = pressedSlot < 0 && githubBounds().contains(e.position);
+    pressedControl = pressedSlot < 0 ? controlAt(e.position) : -1;
 }
 
-void PeepChainEditor::mouseDrag(const juce::MouseEvent& e) {
+void PeepChainView::mouseDrag(const juce::MouseEvent& e) {
     if (pressedSlot < 0) return;
     dragDx = (float)e.getDistanceFromDragStartX();
     if (!dragging && std::abs(dragDx) > 6.0f) dragging = true;
@@ -322,12 +351,12 @@ void PeepChainEditor::mouseDrag(const juce::MouseEvent& e) {
     }
 }
 
-void PeepChainEditor::previewDrag(int fromSlot, float dx) {
+void PeepChainView::previewDrag(int fromSlot, float dx) {
     pressedSlot = fromSlot; dragging = true; dragDx = dx;
     dragToSlot = juce::jlimit(0, kStages - 1, pressedSlot + juce::roundToInt(dragDx / slotBounds(0).getWidth()));
 }
 
-void PeepChainEditor::mouseUp(const juce::MouseEvent& e) {
+void PeepChainView::mouseUp(const juce::MouseEvent& e) {
     if (pressedSlot >= 0) {
         if (dragging) proc.setOrder(displayOrder());                               // drop: one reorder, however far it moved
         else if (slotAt(e.position) == pressedSlot) toggleStage(proc.getOrder()[(size_t)pressedSlot]);
@@ -339,23 +368,32 @@ void PeepChainEditor::mouseUp(const juce::MouseEvent& e) {
         }
     } else if (pressedUpdate && updateBounds().contains(e.position)) {
         UpdateChecker::releasesPage().launchInDefaultBrowser();
+    } else if (pressedGithub && githubBounds().contains(e.position)) {
+        UpdateChecker::repoPage().launchInDefaultBrowser();
+    } else if (pressedControl >= 0 && controlAt(e.position) == pressedControl) {
+        activate(pressedControl);
     }
-    pressedSlot = dragToSlot = -1; dragging = false; pressedReset = false; pressedAutoGain = false; pressedUpdate = false; dragDx = 0;
+    pressedControl = -1;
+    pressedSlot = dragToSlot = -1; dragging = false; pressedReset = false; pressedAutoGain = false; pressedUpdate = false; pressedGithub = false; dragDx = 0;
     mouseMove(e);
     repaint();
 }
 
-void PeepChainEditor::mouseMove(const juce::MouseEvent& e) {
+void PeepChainView::mouseMove(const juce::MouseEvent& e) {
     lastMouse = e.position;
     overReset = resetBounds().contains(e.position) && !proc.isPeepPreset();
     overAutoGain = autoGainBounds().contains(e.position);
     overUpdate = updateBounds().contains(e.position) && updates->getState() == UpdateChecker::State::available;
-    setMouseCursor(slotAt(e.position) >= 0 || overReset || overAutoGain || overUpdate ? juce::MouseCursor::PointingHandCursor : juce::MouseCursor::NormalCursor);
+    const bool wasOverGithub = std::exchange(overGithub, githubBounds().contains(e.position));
+    if (overGithub != wasOverGithub) repaint(githubBounds().expanded(2.0f).toNearestInt());
+    const int wasOverControl = std::exchange(overControl, controlAt(e.position));
+    if (overControl != wasOverControl) for (int c : {wasOverControl, overControl}) if (c >= 0) repaint(controlBounds(c).expanded(3.0f).toNearestInt());
+    setMouseCursor(slotAt(e.position) >= 0 || overReset || overAutoGain || overUpdate || overGithub || overControl >= 0 ? juce::MouseCursor::PointingHandCursor : juce::MouseCursor::NormalCursor);
 }
 
 //==============================================================================
-void PeepChainEditor::renderBackdrop() {
-    const float scale = 2.0f;                                     // drawn once at retina size, then just blitted
+void PeepChainView::renderBackdrop() {
+    const float scale = imageScale;                                     // drawn once at retina size, then just blitted
     backdrop = juce::Image(juce::Image::ARGB, (int)(kW * scale), (int)(kH * scale), true);
     juce::Graphics g(backdrop);
     g.addTransform(juce::AffineTransform::scale(scale));
@@ -401,9 +439,9 @@ void PeepChainEditor::renderBackdrop() {
     }
 
     // loose bars across the top right, one snapped in half with crumbs
-    miniBar(g, {kW - 76.0f, 78.0f}, 62.0f, 0.42f, 1.0f);
+    miniBar(g, {kW - 76.0f, 70.0f}, 62.0f, 0.42f, 1.0f);
     miniBar(g, {kW - 150.0f, 40.0f}, 62.0f, -0.30f, 1.0f);
-    miniBar(g, {kW - 214.0f, 90.0f}, 62.0f, 0.08f, 1.0f, Pal::pale());
+    miniBar(g, {kW - 214.0f, 80.0f}, 62.0f, 0.08f, 1.0f, Pal::pale());
     miniBar(g, {kW - 296.0f, 52.0f}, 62.0f, 1.15f, 1.0f);
     miniBar(g, {kW - 372.0f, 84.0f}, 62.0f, -0.12f, 1.0f);
     miniBar(g, {kW - 78.0f, 28.0f}, 31.0f, 0.9f, 1.0f, Pal::pill(), false);
@@ -430,11 +468,11 @@ static void reductionBar(juce::Graphics& g, RectF r, float db, float maxDb) {
 
 static void readout(juce::Graphics& g, RectF r, float db) {
     g.setColour(db > 0.3f ? Pal::pale() : Pal::dim().brighter(0.4f));
-    g.setFont(PeepChainEditor::labelFont(13.0f).withExtraKerningFactor(0.04f));
+    g.setFont(PeepChainView::labelFont(13.0f).withExtraKerningFactor(0.04f));
     g.drawText(db > 0.05f ? "-" + juce::String(db, 1) : "0.0", r, juce::Justification::centred, false);
 }
 
-void PeepChainEditor::paintStageDisplay(juce::Graphics& g, RectF in, int stage, bool on) {
+void PeepChainView::paintStageDisplay(juce::Graphics& g, RectF in, int stage, bool on) {
     const float gOpen = on ? gateOpen : 0.0f, cDb = on ? compDb : 0.0f, lDb = on ? limDb : 0.0f;
     if (stage == PeepChain::kGate) {                              // a heart that lights up while the gate is open
         const auto hr = RectF(46.0f, 42.0f).withCentre(in.getCentre().translated(0.0f, 1.0f));
@@ -512,10 +550,14 @@ SegmentLayout layoutSegment(RectF slot, bool roundLeft, bool roundRight) {
 const float kLayerMargin = 46.0f;                                 // room round the bar for its shadow and glow
 }
 
-void PeepChainEditor::timerCallback() {
+void PeepChainView::timerCallback() {
     updateMeters();
     const auto key = stateKey();
-    if (key != lastPaintedKey) { lastPaintedKey = key; repaint(); return; }          // something was switched or moved: everything
+    if (key != lastPaintedKey) { lastPaintedKey = key; lastControlsKey = controlsKey(); repaint(); return; }   // something was switched or moved: everything
+    if (const auto ck = controlsKey(); ck != lastControlsKey) {                       // undo / redo available, A/B, sync
+        lastControlsKey = ck;
+        for (int c = 0; c < kNumControls; ++c) repaint(controlBounds(c).expanded(3.0f).toNearestInt());
+    }
     if (dragging) repaint(chainStrip().expanded(14.0f, 0.0f).toNearestInt());         // otherwise just the moving parts:
     else for (int slot = 0; slot < kStages; ++slot)                                   // the six little windows and the level meters
         repaint(layoutSegment(slotBounds(slot), slot == 0, slot == kStages - 1).well.toNearestInt());
@@ -525,7 +567,7 @@ void PeepChainEditor::timerCallback() {
 }
 
 /** One part of the bar, without the moving display in its window (that is drawn on top every frame). */
-void PeepChainEditor::paintSegment(juce::Graphics& g, RectF slot, int stage, int slotIndex, bool roundLeft, bool roundRight, bool lifted) {
+void PeepChainView::paintSegment(juce::Graphics& g, RectF slot, int stage, int slotIndex, bool roundLeft, bool roundRight, bool lifted) {
     const bool on = proc.isStageOn(stage);
     const auto l = layoutSegment(slot, roundLeft, roundRight);
     const auto& r = l.body; const auto& head = l.head; const auto& well = l.well; const auto& light = l.light;
@@ -571,7 +613,7 @@ void PeepChainEditor::paintSegment(juce::Graphics& g, RectF slot, int stage, int
     if (!on) { paintStageDisplay(g, well.reduced(8.0f, 6.0f), stage, false); g.endTransparencyLayer(); }
 }
 
-juce::uint64 PeepChainEditor::stateKey() const {
+juce::uint64 PeepChainView::stateKey() const {
     juce::uint64 k = 0;
     for (int st : displayOrder()) k = k * 8 + (juce::uint64)st;
     for (int i = 0; i < kStages; ++i) k = k * 2 + (proc.isStageOn(i) ? 1u : 0u);
@@ -581,8 +623,8 @@ juce::uint64 PeepChainEditor::stateKey() const {
 }
 
 /** The bar itself changes only when something is switched, moved or dragged, so it is drawn once and kept. */
-void PeepChainEditor::renderChainLayer() {
-    const float scale = 2.0f;
+void PeepChainView::renderChainLayer() {
+    const float scale = imageScale;
     const auto shown = displayOrder();
     const int lifted = dragging && pressedSlot >= 0 ? proc.getOrder()[(size_t)pressedSlot] : -1;
     const auto area = chainStrip();
@@ -615,9 +657,9 @@ void PeepChainEditor::renderChainLayer() {
     chainKey = stateKey() * 8 + (juce::uint64)(dragToSlot + 1);
 }
 
-RectF PeepChainEditor::chainStrip() const { return RectF(kBarX, kBarY, (float)getWidth() - 2.0f * kBarX, kBarH).expanded(kLayerMargin - 18.0f, kLayerMargin); }
+RectF PeepChainView::chainStrip() const { return RectF(kBarX, kBarY, (float)getWidth() - 2.0f * kBarX, kBarH).expanded(kLayerMargin - 18.0f, kLayerMargin); }
 
-void PeepChainEditor::paintChain(juce::Graphics& g) {
+void PeepChainView::paintChain(juce::Graphics& g) {
     if (chainLayer.isNull() || chainKey != stateKey() * 8 + (juce::uint64)(dragToSlot + 1)) renderChainLayer();
     g.drawImage(chainLayer, chainStrip());
     const auto shown = displayOrder();
@@ -639,7 +681,7 @@ void PeepChainEditor::paintChain(juce::Graphics& g) {
     }
 }
 
-void PeepChainEditor::paintLevelMeter(juce::Graphics& g, RectF r, const juce::String& name, float db, bool inputGuide) {
+void PeepChainView::paintLevelMeter(juce::Graphics& g, RectF r, const juce::String& name, float db, bool inputGuide) {
     g.setColour(Pal::pale()); g.setFont(labelFont(16.0f));
     g.drawText(name, r.removeFromLeft(38.0f), juce::Justification::centredLeft, false);
     auto bar = r.withSizeKeepingCentre(r.getWidth(), 10.0f);
@@ -668,7 +710,7 @@ void PeepChainEditor::paintLevelMeter(juce::Graphics& g, RectF r, const juce::St
     }
 }
 
-void PeepChainEditor::paintResetCapsule(juce::Graphics& g) {
+void PeepChainView::paintResetCapsule(juce::Graphics& g) {
     // a two-tone capsule: pink half, white half
     const auto r = resetBounds(); const float rad = r.getHeight() * 0.5f;
     const bool peep = proc.isPeepPreset();
@@ -690,7 +732,7 @@ void PeepChainEditor::paintResetCapsule(juce::Graphics& g) {
     if (peep) g.endTransparencyLayer();
 }
 
-void PeepChainEditor::paintAutoGainCapsule(juce::Graphics& g) {
+void PeepChainView::paintAutoGainCapsule(juce::Graphics& g) {
     // same two-tone capsule as the reset one; its pink end is lit while Auto Gain is on
     const auto r = autoGainBounds(); const float rad = r.getHeight() * 0.5f;
     const bool on = proc.apvts.getRawParameterValue("autoGain")->load() > 0.5f;
@@ -717,9 +759,27 @@ void PeepChainEditor::paintAutoGainCapsule(juce::Graphics& g) {
     stampText(g, text, r.withTrimmedLeft(34.0f).translated(0.0f, 1.5f), labelFont(15.0f), juce::Justification::centred, on ? 1.4f : 1.0f);
 }
 
-void PeepChainEditor::paintVersion(juce::Graphics& g) {
+// GitHub's mark (Octicons "mark-github", MIT), in a 16 x 16 box.
+static const juce::Path& githubMark() {
+    static const juce::Path p = juce::Drawable::parseSVGPath(
+        "M8 0c4.42 0 8 3.58 8 8a8.013 8.013 0 0 1-5.45 7.59c-.4.08-.55-.17-.55-.38 0-.27.01-1.13.01-2.2 0-.75-.25-1.23-.54-1.48 "
+        "1.78-.2 3.65-.88 3.65-3.95 0-.88-.31-1.59-.82-2.15.08-.2.36-1.02-.08-2.12 0 0-.67-.22-2.2.82-.64-.18-1.32-.27-2-.27"
+        "-.68 0-1.36.09-2 .27-1.53-1.03-2.2-.82-2.2-.82-.44 1.1-.16 1.92-.08 2.12-.51.56-.82 1.28-.82 2.15 0 3.06 1.86 3.75 "
+        "3.64 3.95-.23.2-.44.55-.51 1.07-.46.21-1.61.55-2.33-.66-.15-.24-.6-.83-1.23-.82-.67.01-.27.38.01.53.34.19.73.9.82 "
+        "1.13.16.45.68 1.31 2.69.94 0 .67.01 1.3.01 1.49 0 .21-.15.45-.55.38A7.995 7.995 0 0 1 0 8c0-4.42 3.58-8 8-8Z");
+    return p;
+}
+
+void PeepChainView::paintVersion(juce::Graphics& g) {
     g.setColour(Pal::grey().withAlpha(0.8f)); g.setFont(labelFont(12.0f));
-    g.drawText("V" + UpdateChecker::currentVersion(), RectF(100.0f, 91.0f, 50.0f, 16.0f), juce::Justification::centredLeft, false);
+    g.drawText(versionText(), RectF(kVersionX, kVersionY, 50.0f, 16.0f), juce::Justification::centredLeft, false);
+    if (UpdateChecker::isConfigured()) {
+        const auto r = githubBounds();
+        g.setColour(overGithub ? Pal::hot() : Pal::grey().withAlpha(0.8f));
+        const auto icon = RectF(r.getX(), r.getY(), 12.0f, 12.0f).withCentre({r.getX() + 6.0f, r.getCentreY() - 0.5f});
+        g.fillPath(githubMark(), githubMark().getTransformToScaleToFit(icon, true));
+        g.drawText("GITHUB", r.withTrimmedLeft(16.0f), juce::Justification::centredLeft, false);
+    }
     if (updates->getState() == UpdateChecker::State::available) {
         const auto r = updateBounds();
         g.setColour(overUpdate ? Pal::hot() : Pal::pink()); g.setFont(labelFont(12.0f));
@@ -727,7 +787,96 @@ void PeepChainEditor::paintVersion(juce::Graphics& g) {
     }
 }
 
-void PeepChainEditor::paint(juce::Graphics& g) {
+RectF PeepChainView::controlBounds(int c) const {
+    if (c == kSync) {                                              // beside the DELAY caption
+        const float cx = kW * 7.0f / 12.0f;
+        return {cx + 27.0f, kKnobY - 19.0f, 38.0f, 15.0f};
+    }
+    auto textW = [](const char* t) { return juce::GlyphArrangement::getStringWidth(labelFont(12.0f), t) + 6.0f; };
+    const float y = 101.0f, h = 16.0f, pill = 20.0f;
+    float x = kW - kBarX;                                          // right-aligned with the capsules below
+    RectF r[kNumControls];
+    auto take = [&](int ctl, float w, float gapBefore) { r[ctl] = {x - w, y, w, h}; x -= w + gapBefore; };
+    take(kSize, textW("SIZE 200%"), 14.0f);
+    take(kCopy, textW("COPY A TO B"), 6.0f);
+    take(kSlotB, pill, 4.0f);
+    take(kSlotA, pill, 18.0f);
+    take(kRedo, textW("REDO"), 6.0f);
+    take(kUndo, textW("UNDO"), 0.0f);
+    return c >= 0 && c < kNumControls ? r[c] : RectF();
+}
+
+bool PeepChainView::isControlEnabled(int c) const {
+    if (c == kUndo) return proc.canUndo();
+    if (c == kRedo) return proc.canRedo();
+    if (c == kSlotA || c == kSlotB) return proc.getActiveSlot() != (c == kSlotA ? 0 : 1);
+    return c >= 0 && c < kNumControls;
+}
+
+int PeepChainView::controlAt(PointF p) const {
+    for (int c = 0; c < kNumControls; ++c) if (controlBounds(c).contains(p) && isControlEnabled(c)) return c;
+    return -1;
+}
+
+juce::uint32 PeepChainView::controlsKey() const {
+    return (proc.canUndo() ? 1u : 0u) | (proc.canRedo() ? 2u : 0u) | (proc.getActiveSlot() == 1 ? 4u : 0u)
+         | (proc.apvts.getRawParameterValue("delaySync")->load() > 0.5f ? 8u : 0u);
+}
+
+void PeepChainView::activate(int c) {
+    switch (c) {
+        case kUndo: proc.undo(); break;
+        case kRedo: proc.redo(); break;
+        case kSlotA: proc.selectSlot(0); break;
+        case kSlotB: proc.selectSlot(1); break;
+        case kCopy: proc.copyToOtherSlot(); break;
+        case kSize: if (onSizeClicked) onSizeClicked(); break;
+        case kSync:
+            if (auto* p = proc.apvts.getParameter("delaySync")) {
+                p->beginChangeGesture(); p->setValueNotifyingHost(p->getValue() > 0.5f ? 0.0f : 1.0f); p->endChangeGesture();
+            }
+            break;
+        default: break;
+    }
+    repaint();
+}
+
+void PeepChainView::paintControls(juce::Graphics& g) {
+    auto colourFor = [&](int c) {
+        if (!isControlEnabled(c)) return Pal::grey().withAlpha(0.3f);
+        return overControl == c ? Pal::hot() : Pal::grey().withAlpha(0.85f);
+    };
+    auto text = [&](int c, const juce::String& t, juce::Justification j) {
+        g.setColour(colourFor(c)); g.setFont(labelFont(12.0f)); g.drawText(t, controlBounds(c), j, false);
+    };
+    // a small capsule: lit pink when on, an outline otherwise
+    auto pill = [&](int c, const juce::String& t, bool lit, float fontH) {
+        const auto r = controlBounds(c); const float rad = r.getHeight() * 0.5f;
+        if (lit) {
+            juce::Path shape; shape.addRoundedRectangle(r, rad);
+            juce::DropShadow(Pal::pink().withAlpha(0.6f), 8, {}).drawForPath(g, shape);
+            g.setGradientFill(juce::ColourGradient(Pal::hot(), 0.0f, r.getY(), Pal::pink().darker(0.25f), 0.0f, r.getBottom(), false));
+            g.fillPath(shape);
+            g.setColour(juce::Colours::white);
+        } else {
+            g.setColour(overControl == c ? Pal::hot() : Pal::grey().withAlpha(0.6f));
+            g.drawRoundedRectangle(r.reduced(0.5f), rad - 0.5f, 1.0f);
+        }
+        g.setFont(labelFont(fontH)); g.drawText(t, r.translated(lit ? 0.5f : 0.5f, 0.5f), juce::Justification::centred, false);
+    };
+    text(kUndo, "UNDO", juce::Justification::centred);
+    text(kRedo, "REDO", juce::Justification::centred);
+    pill(kSlotA, "A", proc.getActiveSlot() == 0, 12.0f);
+    pill(kSlotB, "B", proc.getActiveSlot() == 1, 12.0f);
+    text(kCopy, proc.getActiveSlot() == 0 ? "COPY A TO B" : "COPY B TO A", juce::Justification::centred);
+    text(kSize, "SIZE " + juce::String(juce::roundToInt(scaleShown * 100.0f)) + "%", juce::Justification::centredRight);
+    pill(kSync, "SYNC", proc.apvts.getRawParameterValue("delaySync")->load() > 0.5f, 11.0f);
+}
+
+void PeepChainView::paint(juce::Graphics& g) {
+    // The cached pictures are drawn at (at least) the screen's own resolution, so a bigger window stays sharp.
+    const float want = juce::jmax(2.0f, std::ceil(g.getInternalContext().getPhysicalPixelScaleFactor() - 0.01f));
+    if (want != imageScale) { imageScale = want; backdrop = {}; chainLayer = {}; liftedLayer = {}; }
     if (backdrop.isNull()) renderBackdrop();
     g.drawImage(backdrop, getLocalBounds().toFloat());
     const float W = (float)getWidth();
@@ -737,6 +886,7 @@ void PeepChainEditor::paint(juce::Graphics& g) {
     paintResetCapsule(g);
     paintAutoGainCapsule(g);
     paintVersion(g);
+    paintControls(g);
     paintChain(g);
 
     // knob captions
@@ -755,4 +905,41 @@ void PeepChainEditor::paint(juce::Graphics& g) {
     paintLevelMeter(g, {W * 0.5f + 20.0f, kMeterY, W * 0.5f - 60.0f, 22.0f}, "OUT", outDb, false);
     g.setColour(Pal::grey().withAlpha(0.75f)); g.setFont(labelFont(12.0f));
     g.drawText("DOUBLE-CLICK A KNOB FOR PEEP'S VALUE", getLocalBounds().toFloat().withTop(kH - 28.0f).withHeight(16.0f), juce::Justification::centred, false);
+}
+
+//==============================================================================
+static juce::PropertiesFile::Options settingsFileOptions() {
+    juce::PropertiesFile::Options o;
+    o.applicationName = "PeepChain"; o.filenameSuffix = ".settings";
+    o.folderName = "PeepChain"; o.osxLibrarySubFolder = "Application Support";
+    return o;
+}
+static constexpr int kScalePercents[] = {75, 100, 125, 150, 175, 200};
+
+PeepChainEditor::PeepChainEditor(PeepChainProcessor& p) : AudioProcessorEditor(&p), view(p) {
+    addAndMakeVisible(view);
+    view.onSizeClicked = [this] { showSizeMenu(); };
+    juce::PropertiesFile settings(settingsFileOptions());
+    setUiScale((float)settings.getDoubleValue("uiScale", 1.0), false);
+}
+
+void PeepChainEditor::setUiScale(float s, bool remember) {
+    s = juce::jlimit(0.75f, 2.0f, s);
+    const bool changed = std::abs(s - uiScale) > 1e-4f;
+    uiScale = s;
+    view.setTransform(juce::AffineTransform::scale(s));
+    view.setScaleShown(s);
+    setSize(juce::roundToInt((float)PeepChainView::kWidth * s), juce::roundToInt((float)PeepChainView::kHeight * s));
+    if (changed && remember) { juce::PropertiesFile settings(settingsFileOptions()); settings.setValue("uiScale", (double)s); settings.saveIfNeeded(); }
+}
+
+void PeepChainEditor::showSizeMenu() {
+    juce::PopupMenu m;
+    m.addSectionHeader("Window size");
+    for (int pct : kScalePercents) m.addItem(pct, juce::String(pct) + " %", true, juce::roundToInt(uiScale * 100.0f) == pct);
+    const auto area = view.localAreaToGlobal(view.controlBounds(PeepChainView::kSize)).toNearestInt();
+    m.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(&view).withTargetScreenArea(area),
+                    [safe = juce::Component::SafePointer<PeepChainEditor>(this)](int result) {
+                        if (safe != nullptr && result > 0) safe->setUiScale((float)result / 100.0f);
+                    });
 }

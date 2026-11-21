@@ -11,14 +11,16 @@ public:
 };
 
 /**
+ * Everything in the window, drawn at 860 x 598; the editor below scales it as a whole.
  * The chain is drawn as one long scored pill bar, one segment per effect. Click a segment to switch that
  * effect on or off (an off segment is missing from the bar); drag it sideways to change the order.
  * Under it: six tablet knobs (input, gate threshold, compressor threshold, delay, reverb, output) and the level meters.
  */
-class PeepChainEditor : public juce::AudioProcessorEditor, public juce::TooltipClient, private juce::Timer {
+class PeepChainView : public juce::Component, public juce::TooltipClient, private juce::Timer {
 public:
-    explicit PeepChainEditor(PeepChainProcessor&);
-    ~PeepChainEditor() override;
+    static constexpr int kWidth = 860, kHeight = 598;
+    explicit PeepChainView(PeepChainProcessor&);
+    ~PeepChainView() override;
     void paint(juce::Graphics&) override;
     void resized() override;
     void mouseDown(const juce::MouseEvent&) override;
@@ -32,8 +34,15 @@ public:
     juce::Rectangle<float> slotBounds(int slot) const;
     juce::Rectangle<float> resetBounds() const;
     juce::Rectangle<float> autoGainBounds() const;               // the Auto Gain switch, left of the reset capsule
+    juce::Rectangle<float> githubBounds() const;                 // the GitHub button right of the version (empty when no repo is set)
     juce::Rectangle<float> updateBounds() const;                 // the "new version" notice under the title
     juce::String getTooltip() override;                          // for the drawn (non-component) controls
+    /** The small drawn buttons: the toolbar top right, and SYNC by the Delay knob. */
+    enum Control { kUndo, kRedo, kSlotA, kSlotB, kCopy, kSize, kSync, kNumControls };
+    juce::Rectangle<float> controlBounds(int control) const;
+    /** Called when SIZE is clicked (the editor shows its menu). */
+    std::function<void()> onSizeClicked;
+    void setScaleShown(float s) { scaleShown = s; repaint(controlBounds(kSize).expanded(2.0f).toNearestInt()); }
     /** Tests only: hold a segment mid-drag (as if the mouse were still down) so it can be photographed. */
     void previewDrag(int fromSlot, float dx);
 
@@ -71,6 +80,11 @@ private:
     void paintResetCapsule(juce::Graphics&);
     void paintAutoGainCapsule(juce::Graphics&);
     void paintVersion(juce::Graphics&);
+    void paintControls(juce::Graphics&);
+    int controlAt(juce::Point<float>) const;                     // -1 when not on an enabled one
+    bool isControlEnabled(int) const;
+    void activate(int control);
+    juce::uint32 controlsKey() const;
 
     int slotAt(juce::Point<float>) const;                       // -1 when not on a segment
     PeepChainProcessor::Order displayOrder() const;             // the saved order, or the preview while dragging
@@ -85,11 +99,16 @@ private:
     juce::TooltipWindow tooltips{this, 900};
     juce::Image backdrop, chainLayer, liftedLayer;
     juce::uint64 chainKey = 0, lastPaintedKey = 0;
+    juce::uint32 lastControlsKey = 0;
+    float imageScale = 2.0f;                                     // pixels per point of the cached pictures
+    float scaleShown = 1.0f;
 
     // segment drag state
     int pressedSlot = -1, dragToSlot = -1;
     bool dragging = false, pressedReset = false, overReset = false;
     bool pressedAutoGain = false, overAutoGain = false, pressedUpdate = false, overUpdate = false;
+    bool pressedGithub = false, overGithub = false;
+    int pressedControl = -1, overControl = -1;
     juce::Point<float> lastMouse;
     float dragDx = 0;
 
@@ -97,5 +116,19 @@ private:
     juce::uint32 lastBlocks = 0; int idleTicks = 1000;                 // audio-stopped detection for the meters
     float autoGainShownDb = 0, autoGainPaintedDb = 0;
     float gateOpen = 0, compDb = 0, limDb = 0, bandDb[4] = {0, 0, 0, 0}, inDb = -100, outDb = -100;
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PeepChainView)
+};
+
+/** The plugin window: the view, scaled to the chosen size (75 to 200 %, remembered for new windows). */
+class PeepChainEditor : public juce::AudioProcessorEditor {
+public:
+    explicit PeepChainEditor(PeepChainProcessor&);
+    PeepChainView& getView() { return view; }
+    float getUiScale() const { return uiScale; }
+    void setUiScale(float, bool remember = true);           // remember: also for windows opened later
+private:
+    void showSizeMenu();
+    PeepChainView view;
+    float uiScale = 1.0f;
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PeepChainEditor)
 };
